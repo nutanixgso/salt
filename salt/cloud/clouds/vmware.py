@@ -598,8 +598,8 @@ def _set_network_adapter_mapping(adapter_specs):
         gateway = adapter_specs['gateway']
         adapter_mapping.adapter.gateway = gateway
     if 'ip' in list(adapter_specs.keys()):
-        ip = str(adapter_specs['ip'])
-        subnet_mask = str(adapter_specs['subnet_mask'])
+        ip = unicode(adapter_specs['ip'])
+        subnet_mask = unicode(adapter_specs['subnet_mask'])
         adapter_mapping.adapter.ip = vim.vm.customization.FixedIp(ipAddress=ip)
         adapter_mapping.adapter.subnetMask = subnet_mask
     else:
@@ -792,7 +792,7 @@ def _wait_for_vmware_tools(vm_ref, max_wait):
     while time_counter < max_wait:
         if time_counter % 5 == 0:
             log.info(u"[ {0} ] Waiting for VMware tools to be running [{1} s]".format(vm_ref.name, time_counter))
-        if str(vm_ref.summary.guest.toolsRunningStatus) == "guestToolsRunning":
+        if unicode(vm_ref.summary.guest.toolsRunningStatus) == "guestToolsRunning":
             log.info(u"[ {0} ] Successfully got VMware tools running on the guest in {1} seconds".format(vm_ref.name, time_counter))
             return True
 
@@ -941,7 +941,7 @@ def _format_instance_info_select(vm, selection):
         vm_select_info['size'] = u"cpu: {0}\nram: {1}".format(cpu, ram)
 
     if 'state' in selection:
-        vm_select_info['state'] = str(vm["summary.runtime.powerState"]) if "summary.runtime.powerState" in vm else "N/A"
+        vm_select_info['state'] = unicode(vm["summary.runtime.powerState"]) if "summary.runtime.powerState" in vm else "N/A"
 
     if 'guest_id' in selection:
         vm_select_info['guest_id'] = vm["config.guestId"] if "config.guestId" in vm else "N/A"
@@ -953,7 +953,7 @@ def _format_instance_info_select(vm, selection):
         vm_select_info['path'] = vm["config.files.vmPathName"] if "config.files.vmPathName" in vm else "N/A"
 
     if 'tools_status' in selection:
-        vm_select_info['tools_status'] = str(vm["guest.toolsStatus"]) if "guest.toolsStatus" in vm else "N/A"
+        vm_select_info['tools_status'] = unicode(vm["guest.toolsStatus"]) if "guest.toolsStatus" in vm else "N/A"
 
     if 'private_ips' in selection or 'networks' in selection:
         network_full_info = {}
@@ -1123,21 +1123,21 @@ def _format_instance_info(vm):
     cpu = vm["config.hardware.numCPU"] if "config.hardware.numCPU" in vm else "N/A"
     ram = u"{0} MB".format(vm["config.hardware.memoryMB"]) if "config.hardware.memoryMB" in vm else "N/A"
     vm_full_info = {
-        'id': str(vm['name']),
+        'id': unicode(vm['name']),
         'image': u"{0} (Detected)".format(vm["config.guestFullName"]) if "config.guestFullName" in vm else "N/A",
         'size': u"cpu: {0}\nram: {1}".format(cpu, ram),
-        'state': str(vm["summary.runtime.powerState"]) if "summary.runtime.powerState" in vm else "N/A",
+        'state': unicode(vm["summary.runtime.powerState"]) if "summary.runtime.powerState" in vm else "N/A",
         'private_ips': ip_addresses,
         'public_ips': [],
         'devices': device_full_info,
         'storage': storage_full_info,
         'files': file_full_info,
-        'guest_id': str(vm["config.guestId"]) if "config.guestId" in vm else "N/A",
-        'hostname': str(vm["object"].guest.hostName),
+        'guest_id': unicode(vm["config.guestId"]) if "config.guestId" in vm else "N/A",
+        'hostname': unicode(vm["object"].guest.hostName),
         'mac_addresses': device_mac_addresses,
         'networks': network_full_info,
-        'path': str(vm["config.files.vmPathName"]) if "config.files.vmPathName" in vm else "N/A",
-        'tools_status': str(vm["guest.toolsStatus"]) if "guest.toolsStatus" in vm else "N/A"
+        'path': unicode(vm["config.files.vmPathName"]) if "config.files.vmPathName" in vm else "N/A",
+        'tools_status': unicode(vm["guest.toolsStatus"]) if "guest.toolsStatus" in vm else "N/A"
     }
 
     return vm_full_info
@@ -1150,7 +1150,7 @@ def _get_snapshots(snapshot_list, current_snapshot=None, parent_snapshot_path=""
         snapshots[snapshot_path] = {
             'name': snapshot.name,
             'description': snapshot.description,
-            'created': str(snapshot.createTime).split('.')[0],
+            'created': unicode(snapshot.createTime).split('.')[0],
             'state': snapshot.state,
             'path': snapshot_path,
         }
@@ -1507,7 +1507,7 @@ def list_nodes(kwargs=None, call=None):
             'id': vm["name"],
             'image': u"{0} (Detected)".format(vm["config.guestFullName"]) if "config.guestFullName" in vm else "N/A",
             'size': u"cpu: {0}\nram: {1}".format(cpu, ram),
-            'state': str(vm["summary.runtime.powerState"]) if "summary.runtime.powerState" in vm else "N/A",
+            'state': unicode(vm["summary.runtime.powerState"]) if "summary.runtime.powerState" in vm else "N/A",
             'private_ips': [vm["guest.ipAddress"]] if "guest.ipAddress" in vm else [],
             'public_ips': []
         }
@@ -2418,7 +2418,7 @@ def create(vm_):
     # If the hardware version is specified and if it is different from the current
     # hardware version, then schedule a hardware version upgrade
     if hardware_version:
-        hardware_version = u"vmx-{0}".format(str(hardware_version).zfill(2))
+        hardware_version = u"vmx-{0}".format(unicode(hardware_version).zfill(2))
         if hardware_version != object_ref.config.version:
             log.debug(u"Scheduling hardware version upgrade from {0} to {1}".format(object_ref.config.version, hardware_version))
             scheduled_hardware_upgrade = vim.vm.ScheduledHardwareUpgradeInfo()
