@@ -5,6 +5,7 @@ Developing Salt Tutorial
 ========================
 
 This tutorial assumes you have:
+
 * a web browser
 * a GitHub account (``<my_account>``)
 * a command line (CLI)
@@ -180,7 +181,7 @@ request``.
 
 .. note::
 
-    Although these instructions seem to be the official pull request proceedure
+    Although these instructions seem to be the official pull request procedure
     on github's website, here are two alternative methods that are simpler.
 
     * If you navigate to your clone of salt,

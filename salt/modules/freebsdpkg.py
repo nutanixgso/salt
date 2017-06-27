@@ -2,6 +2,12 @@
 '''
 Remote package support using ``pkg_add(1)``
 
+.. important::
+    If you feel that Salt should be using this module to manage packages on a
+    minion, and it is using a different module (or gives an error similar to
+    *'pkg.install' is not available*), see :ref:`here
+    <module-provider-override>`.
+
 .. warning::
 
     This module has been completely rewritten. Up to and including version
@@ -75,6 +81,7 @@ import re
 
 # Import salt libs
 import salt.utils
+import salt.utils.pkg
 from salt.exceptions import CommandExecutionError, MinionError
 import salt.ext.six as six
 
@@ -240,6 +247,8 @@ def refresh_db():
 
         salt '*' pkg.refresh_db
     '''
+    # Remove rtag file to keep multiple refreshes from happening in pkg states
+    salt.utils.pkg.clear_rtag(__opts__)
     return True
 
 
@@ -412,20 +421,6 @@ def install(name=None,
         )
 
     return ret
-
-
-def upgrade():
-    '''
-    Upgrades are not supported with ``pkg_add(1)``. This function is included
-    for API compatibility only and always returns an empty dict.
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' pkg.upgrade
-    '''
-    return {}
 
 
 def remove(name=None, pkgs=None, **kwargs):

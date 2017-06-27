@@ -8,13 +8,12 @@ and the like, but also useful for basic HTTP testing.
 
 # Import python libs
 from __future__ import absolute_import
+import cgi
 import json
 import logging
 import os.path
 import pprint
 import socket
-import urllib
-import inspect
 import yaml
 
 import ssl
@@ -38,6 +37,7 @@ except ImportError:
 # Import salt libs
 import salt.utils
 import salt.utils.xmlutil as xml
+import salt.utils.args
 import salt.loader
 import salt.config
 import salt.version
@@ -52,6 +52,8 @@ import salt.ext.six.moves.http_client
 import salt.ext.six.moves.http_cookiejar
 import salt.ext.six.moves.urllib.request as urllib_request
 from salt.ext.six.moves.urllib.error import URLError
+from salt.ext.six.moves.urllib.parse import splitquery
+from salt.ext.six.moves.urllib.parse import urlencode as _urlencode
 # pylint: enable=import-error,no-name-in-module
 
 # Don't need a try/except block, since Salt depends on tornado
@@ -118,7 +120,7 @@ def query(url,
           node='minion',
           port=80,
           opts=None,
-          backend='tornado',
+          backend=None,
           requests_lib=None,
           ca_bundle=None,
           verify_ssl=None,
@@ -132,6 +134,7 @@ def query(url,
           handle=False,
           agent=USERAGENT,
           hide_fields=None,
+          raise_error=True,
           **kwargs):
     '''
     Query a resource, and decode the return data
@@ -150,28 +153,33 @@ def query(url,
         else:
             opts = {}
 
-    if requests_lib is None:
-        requests_lib = opts.get('requests_lib', False)
+    if not backend:
+        if requests_lib is not None or 'requests_lib' in opts:
+            salt.utils.warn_until('Oxygen', '"requests_lib:True" has been replaced by "backend:requests", '
+                                            'please change your config')
+            # beware the named arg above
+            if 'backend' in opts:
+                backend = opts['backend']
+            elif requests_lib or opts.get('requests_lib', False):
+                backend = 'requests'
+            else:
+                backend = 'tornado'
+        else:
+            backend = opts.get('backend', 'tornado')
 
-    if requests_lib is True:
-        log.warning('Please set "backend" to "requests" instead of setting '
-                 '"requests_lib" to "True"')
-
+    if backend == 'requests':
         if HAS_REQUESTS is False:
             ret['error'] = ('http.query has been set to use requests, but the '
                             'requests library does not seem to be installed')
             log.error(ret['error'])
             return ret
-
-        backend = 'requests'
-
-    else:
-        requests_log = logging.getLogger('requests')
-        requests_log.setLevel(logging.WARNING)
+        else:
+            requests_log = logging.getLogger('requests')
+            requests_log.setLevel(logging.WARNING)
 
     # Some libraries don't support separation of url and GET parameters
     # Don't need a try/except block, since Salt depends on tornado
-    url_full = tornado.httputil.url_concat(url, params)
+    url_full = tornado.httputil.url_concat(url, params) if params else url
 
     if ca_bundle is None:
         ca_bundle = get_ca_bundle(opts)
@@ -191,7 +199,7 @@ def query(url,
     log_url = sanitize_url(url_full, hide_fields)
 
     log.debug('Requesting URL {0} using {1} method'.format(log_url, method))
-    if method == 'POST':
+    if method == 'POST' and log.isEnabledFor(logging.TRACE):
         # Make sure no secret fields show up in logs
         if isinstance(data, dict):
             log_data = data.copy()
@@ -295,7 +303,7 @@ def query(url,
             if isinstance(cert, six.string_types):
                 if os.path.exists(cert):
                     req_kwargs['cert'] = cert
-            elif isinstance(cert, tuple):
+            elif isinstance(cert, list):
                 if os.path.exists(cert[0]) and os.path.exists(cert[1]):
                     req_kwargs['cert'] = cert
             else:
@@ -306,7 +314,16 @@ def query(url,
             method, url, params=params, data=data, **req_kwargs
         )
         result.raise_for_status()
-        if stream is True or handle is True:
+        if stream is True:
+            # fake a HTTP response header
+            header_callback('HTTP/1.0 {0} MESSAGE'.format(result.status_code))
+            # fake streaming the content
+            streaming_callback(result.content)
+            return {
+                'handle': result,
+            }
+
+        if handle is True:
             return {
                 'handle': result,
                 'body': result.content,
@@ -318,7 +335,10 @@ def query(url,
         result_headers = result.headers
         result_text = result.content
         result_cookies = result.cookies
-        ret['body'] = result.content
+        body = result.content
+        if not isinstance(body, six.text_type):
+            body = body.decode(result.encoding or 'utf-8')
+        ret['body'] = body
     elif backend == 'urllib2':
         request = urllib_request.Request(url_full, data)
         handlers = [
@@ -364,7 +384,7 @@ def query(url,
                     if isinstance(cert, six.string_types):
                         if os.path.exists(cert):
                             cert_chain = (cert)
-                    elif isinstance(cert, tuple):
+                    elif isinstance(cert, list):
                         if os.path.exists(cert[0]) and os.path.exists(cert[1]):
                             cert_chain = cert
                     else:
@@ -401,8 +421,14 @@ def query(url,
             }
 
         result_status_code = result.code
-        result_headers = result.headers.headers
+        result_headers = dict(result.info())
         result_text = result.read()
+        if 'Content-Type' in result_headers:
+            res_content_type, res_params = cgi.parse_header(result_headers['Content-Type'])
+            if res_content_type.startswith('text/') and \
+                    'charset' in res_params and \
+                    not isinstance(result_text, six.text_type):
+                result_text = result_text.decode(res_params['charset'])
         ret['body'] = result_text
     else:
         # Tornado
@@ -413,7 +439,7 @@ def query(url,
             if isinstance(cert, six.string_types):
                 if os.path.exists(cert):
                     req_kwargs['client_cert'] = cert
-            elif isinstance(cert, tuple):
+            elif isinstance(cert, list):
                 if os.path.exists(cert[0]) and os.path.exists(cert[1]):
                     req_kwargs['client_cert'] = cert[0]
                     req_kwargs['client_key'] = cert[1]
@@ -422,7 +448,7 @@ def query(url,
                           'not valid: {0}'.format(cert))
 
         if isinstance(data, dict):
-            data = urllib.urlencode(data)
+            data = _urlencode(data)
 
         if verify_ssl:
             req_kwargs['ca_certs'] = ca_bundle
@@ -446,53 +472,45 @@ def query(url,
                 return ret
 
             tornado.httpclient.AsyncHTTPClient.configure('tornado.curl_httpclient.CurlAsyncHTTPClient')
-            client_argspec = inspect.getargspec(tornado.curl_httpclient.CurlAsyncHTTPClient.initialize)
+            client_argspec = salt.utils.args.get_function_argspec(
+                    tornado.curl_httpclient.CurlAsyncHTTPClient.initialize)
         else:
-            client_argspec = inspect.getargspec(tornado.simple_httpclient.SimpleAsyncHTTPClient.initialize)
+            client_argspec = salt.utils.args.get_function_argspec(
+                    tornado.simple_httpclient.SimpleAsyncHTTPClient.initialize)
 
         supports_max_body_size = 'max_body_size' in client_argspec.args
 
         try:
-            if supports_max_body_size:
-                result = HTTPClient(max_body_size=max_body).fetch(
-                    url_full,
-                    method=method,
-                    headers=header_dict,
-                    auth_username=username,
-                    auth_password=password,
-                    body=data,
-                    validate_cert=verify_ssl,
-                    allow_nonstandard_methods=True,
-                    streaming_callback=streaming_callback,
-                    header_callback=header_callback,
-                    request_timeout=timeout,
-                    proxy_host=proxy_host,
-                    proxy_port=proxy_port,
-                    proxy_username=proxy_username,
-                    proxy_password=proxy_password,
-                    **req_kwargs
-                )
-            else:
-                result = HTTPClient().fetch(
-                    url_full,
-                    method=method,
-                    headers=header_dict,
-                    auth_username=username,
-                    auth_password=password,
-                    body=data,
-                    validate_cert=verify_ssl,
-                    allow_nonstandard_methods=True,
-                    streaming_callback=streaming_callback,
-                    header_callback=header_callback,
-                    request_timeout=timeout,
-                    proxy_host=proxy_host,
-                    proxy_port=proxy_port,
-                    proxy_username=proxy_username,
-                    proxy_password=proxy_password,
-                    **req_kwargs
-                )
+            download_client = HTTPClient(max_body_size=max_body) \
+                if supports_max_body_size \
+                else HTTPClient()
+            result = download_client.fetch(
+                url_full,
+                method=method,
+                headers=header_dict,
+                auth_username=username,
+                auth_password=password,
+                body=data,
+                validate_cert=verify_ssl,
+                allow_nonstandard_methods=True,
+                streaming_callback=streaming_callback,
+                header_callback=header_callback,
+                request_timeout=timeout,
+                proxy_host=proxy_host,
+                proxy_port=proxy_port,
+                proxy_username=proxy_username,
+                proxy_password=proxy_password,
+                raise_error=raise_error,
+                decompress_response=False,
+                **req_kwargs
+            )
         except tornado.httpclient.HTTPError as exc:
             ret['status'] = exc.code
+            ret['error'] = str(exc)
+            return ret
+        except socket.gaierror as exc:
+            if status is True:
+                ret['status'] = 0
             ret['error'] = str(exc)
             return ret
 
@@ -505,7 +523,13 @@ def query(url,
         result_status_code = result.code
         result_headers = result.headers
         result_text = result.body
-        ret['body'] = result.body
+        if 'Content-Type' in result_headers:
+            res_content_type, res_params = cgi.parse_header(result_headers['Content-Type'])
+            if res_content_type.startswith('text/') and \
+                    'charset' in res_params and \
+                    not isinstance(result_text, six.text_type):
+                result_text = result_text.decode(res_params['charset'])
+        ret['body'] = result_text
         if 'Set-Cookie' in result_headers.keys() and cookies is not None:
             result_cookies = parse_cookie_header(result_headers['Set-Cookie'])
             for item in result_cookies:
@@ -529,7 +553,7 @@ def query(url,
         log.trace(('Cannot Trace Log Response Text: {0}. This may be due to '
                   'incompatibilities between requests and logging.').format(exc))
 
-    if text_out is not None and os.path.exists(text_out):
+    if text_out is not None:
         with salt.utils.fopen(text_out, 'w') as tof:
             tof.write(result_text)
 
@@ -593,7 +617,7 @@ def query(url,
         else:
             text = True
 
-        if decode_out and os.path.exists(decode_out):
+        if decode_out:
             with salt.utils.fopen(decode_out, 'w') as dof:
                 dof.write(result_text)
 
@@ -638,7 +662,7 @@ def get_ca_bundle(opts=None):
         '/etc/pki/tls/certs/ca-bundle.trust.crt',
         # RedHat's link for Debian compatibility
         '/etc/ssl/certs/ca-bundle.crt',
-        # Suse has an unusual path
+        # SUSE has an unusual path
         '/var/lib/ca-certificates/ca-bundle.pem',
         # OpenBSD has an unusual path
         '/etc/ssl/cert.pem',
@@ -752,7 +776,13 @@ def _render(template, render, renderer, template_dict, opts):
         if not renderer:
             renderer = opts.get('renderer', 'yaml_jinja')
         rend = salt.loader.render(opts, {})
-        return compile_template(template, rend, renderer, **template_dict)
+        blacklist = opts.get('renderer_blacklist')
+        whitelist = opts.get('renderer_whitelist')
+        ret = compile_template(template, rend, renderer, blacklist, whitelist, **template_dict)
+        ret = ret.read()
+        if str(ret).startswith('#!') and not str(ret).startswith('#!/'):
+            ret = str(ret).split('\n', 1)[1]
+        return ret
     with salt.utils.fopen(template, 'r') as fh_:
         return fh_.read()
 
@@ -824,7 +854,7 @@ def parse_cookie_header(header):
     for cookie in cookies:
         name = None
         value = None
-        for item in cookie.keys():
+        for item in cookie:
             if item in attribs:
                 continue
             name = item
@@ -858,7 +888,7 @@ def sanitize_url(url, hide_fields):
     Make sure no secret fields show up in logs
     '''
     if isinstance(hide_fields, list):
-        url_comps = urllib.splitquery(url)
+        url_comps = splitquery(url)
         log_url = url_comps[0]
         if len(url_comps) > 1:
             log_url += '?'

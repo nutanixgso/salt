@@ -106,7 +106,7 @@ __virtualname__ = 'sqlite3'
 
 def __virtual__():
     if not HAS_SQLITE3:
-        return False
+        return False, 'Could not import sqlite3 returner; sqlite3 is not installed.'
     return __virtualname__
 
 
@@ -178,7 +178,7 @@ def returner(ret):
     _close_conn(conn)
 
 
-def save_load(jid, load):
+def save_load(jid, load, minions=None):
     '''
     Save the load to the specified jid
     '''
@@ -193,6 +193,13 @@ def save_load(jid, load):
     _close_conn(conn)
 
 
+def save_minions(jid, minions, syndic_id=None):  # pylint: disable=unused-argument
+    '''
+    Included for API consistency
+    '''
+    pass
+
+
 def get_load(jid):
     '''
     Return the load from a specified jid
@@ -205,7 +212,7 @@ def get_load(jid):
                 {'jid': jid})
     data = cur.fetchone()
     if data:
-        return json.loads(data)
+        return json.loads(data[0].encode())
     _close_conn(conn)
     return {}
 

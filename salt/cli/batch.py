@@ -27,12 +27,14 @@ class Batch(object):
     '''
     Manage the execution of batch runs
     '''
-    def __init__(self, opts, eauth=None, quiet=False):
+    def __init__(self, opts, eauth=None, quiet=False, parser=None):
         self.opts = opts
         self.eauth = eauth if eauth else {}
+        self.pub_kwargs = eauth if eauth else {}
         self.quiet = quiet
         self.local = salt.client.get_local_client(opts['conf_file'])
-        self.minions, self.ping_gen = self.__gather_minions()
+        self.minions, self.ping_gen, self.down_minions = self.__gather_minions()
+        self.options = parser
 
     def __gather_minions(self):
         '''
@@ -48,19 +50,31 @@ class Batch(object):
         if selected_target_option is not None:
             args.append(selected_target_option)
         else:
-            args.append(self.opts.get('expr_form', 'glob'))
+            args.append(self.opts.get('tgt_type', 'glob'))
 
-        ping_gen = self.local.cmd_iter(*args, **self.eauth)
+        self.pub_kwargs['yield_pub_data'] = True
+        ping_gen = self.local.cmd_iter(*args,
+                                       gather_job_timeout=self.opts['gather_job_timeout'],
+                                       **self.pub_kwargs)
 
+        # Broadcast to targets
         fret = set()
-        try:
-            for ret in ping_gen:
-                m = next(six.iterkeys(ret))
+        nret = set()
+        for ret in ping_gen:
+            if ('minions' and 'jid') in ret:
+                for minion in ret['minions']:
+                    nret.add(minion)
+                continue
+            else:
+                try:
+                    m = next(six.iterkeys(ret))
+                except StopIteration:
+                    if not self.quiet:
+                        print_cli('No minions matched the target.')
+                    break
                 if m is not None:
                     fret.add(m)
-            return (list(fret), ping_gen)
-        except StopIteration:
-            raise salt.exceptions.SaltClientError('No minions matched the target.')
+        return (list(fret), ping_gen, nret.difference(fret))
 
     def get_bnum(self):
         '''
@@ -100,6 +114,9 @@ class Batch(object):
                 'list',
                 ]
         bnum = self.get_bnum()
+        # No targets to run
+        if not self.minions:
+            return
         to_run = copy.deepcopy(self.minions)
         active = []
         ret = {}
@@ -108,6 +125,13 @@ class Batch(object):
         bwait = self.opts.get('batch_wait', 0)
         wait = []
 
+        if self.options:
+            show_jid = self.options.show_jid
+            show_verbose = self.options.verbose
+        else:
+            show_jid = False
+            show_verbose = False
+
         # the minion tracker keeps track of responses and iterators
         # - it removes finished iterators from iters[]
         # - if a previously detected minion does not respond, its
@@ -115,6 +139,11 @@ class Batch(object):
         # - unresponsive minions are removed from active[] to make
         #   sure that the main while loop finishes even with unresp minions
         minion_tracker = {}
+
+        # We already know some minions didn't respond to the ping, so inform
+        # the user we won't be attempting to run a job on them
+        for down_minion in self.down_minions:
+            print_cli('Minion {0} did not respond. No job will be sent.'.format(down_minion))
 
         # Iterate while we still have things to execute
         while len(ret) < len(self.minions):
@@ -139,12 +168,15 @@ class Batch(object):
 
             if next_:
                 if not self.quiet:
-                    print_cli('\nExecuting run on {0}\n'.format(next_))
+                    print_cli('\nExecuting run on {0}\n'.format(sorted(next_)))
                 # create a new iterator for this batch of minions
                 new_iter = self.local.cmd_iter_no_block(
                                 *args,
                                 raw=self.opts.get('raw', False),
                                 ret=self.opts.get('return', ''),
+                                show_jid=show_jid,
+                                verbose=show_verbose,
+                                gather_job_timeout=self.opts['gather_job_timeout'],
                                 **self.eauth)
                 # add it to our iterators and to the minion_tracker
                 iters.append(new_iter)
@@ -161,7 +193,7 @@ class Batch(object):
             for ping_ret in self.ping_gen:
                 if ping_ret is None:
                     break
-                m = next(ping_ret.iterkeys())
+                m = next(six.iterkeys(ping_ret))
                 if m not in self.minions:
                     self.minions.append(m)
                     to_run.append(m)
@@ -179,12 +211,18 @@ class Batch(object):
                                 break
                             continue
                         if self.opts.get('raw'):
-                            parts.update({part['id']: part})
-                            minion_tracker[queue]['minions'].remove(part['id'])
+                            parts.update({part['data']['id']: part})
+                            if part['data']['id'] in minion_tracker[queue]['minions']:
+                                minion_tracker[queue]['minions'].remove(part['data']['id'])
+                            else:
+                                print_cli('minion {0} was already deleted from tracker, probably a duplicate key'.format(part['id']))
                         else:
                             parts.update(part)
-                            for id in part.keys():
-                                minion_tracker[queue]['minions'].remove(id)
+                            for id in part:
+                                if id in minion_tracker[queue]['minions']:
+                                    minion_tracker[queue]['minions'].remove(id)
+                                else:
+                                    print_cli('minion {0} was already deleted from tracker, probably a duplicate key'.format(id))
                 except StopIteration:
                     # if a iterator is done:
                     # - set it to inactive
@@ -206,7 +244,11 @@ class Batch(object):
                     active.remove(minion)
                     if bwait:
                         wait.append(datetime.now() + timedelta(seconds=bwait))
+                # Munge retcode into return data
+                if 'retcode' in data and isinstance(data['ret'], dict) and 'retcode' not in data['ret']:
+                    data['ret']['retcode'] = data['retcode']
                 if self.opts.get('raw'):
+                    ret[minion] = data
                     yield data
                 else:
                     ret[minion] = data['ret']

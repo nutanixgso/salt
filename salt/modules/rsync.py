@@ -4,7 +4,7 @@ Wrapper for rsync
 
 .. versionadded:: 2014.1.0
 
-This data can also be passed into :doc:`pillar </topics/tutorials/pillar>`.
+This data can also be passed into :ref:`pillar <pillar-walk-through>`.
 Options passed into opts will overwrite options passed into pillar.
 '''
 from __future__ import absolute_import
@@ -19,8 +19,20 @@ from salt.exceptions import CommandExecutionError, SaltInvocationError
 
 log = logging.getLogger(__name__)
 
+__virtualname__ = 'rsync'
 
-def _check(delete, force, update, passwordfile, exclude, excludefrom):
+
+def __virtual__():
+    '''
+    Only load module if rsync binary is present
+    '''
+    if salt.utils.which('rsync'):
+        return __virtualname__
+    return (False, 'The rsync execution module cannot be loaded: '
+            'the rsync binary is not in the path.')
+
+
+def _check(delete, force, update, passwordfile, exclude, excludefrom, dryrun, rsh):
     '''
     Generate rsync options
     '''
@@ -32,6 +44,8 @@ def _check(delete, force, update, passwordfile, exclude, excludefrom):
         options.append('--force')
     if update:
         options.append('--update')
+    if rsh:
+        options.append('--rsh={0}'.format(rsh))
     if passwordfile:
         options.extend(['--password-file', passwordfile])
     if excludefrom:
@@ -40,6 +54,8 @@ def _check(delete, force, update, passwordfile, exclude, excludefrom):
             exclude = False
     if exclude:
         options.extend(['--exclude', exclude])
+    if dryrun:
+        options.append('--dry-run')
     return options
 
 
@@ -50,7 +66,9 @@ def rsync(src,
           update=False,
           passwordfile=None,
           exclude=None,
-          excludefrom=None):
+          excludefrom=None,
+          dryrun=False,
+          rsh=None):
     '''
     .. versionchanged:: 2016.3.0
         Return data now contains just the output of the rsync command, instead
@@ -63,8 +81,8 @@ def rsync(src,
 
     .. code-block:: bash
 
-        salt '*' rsync.rsync {src} {dst} {delete=True} {update=True} {passwordfile=/etc/pass.crt} {exclude=xx}
-        salt '*' rsync.rsync {src} {dst} {delete=True} {excludefrom=/xx.ini}
+        salt '*' rsync.rsync {src} {dst} {delete=True} {update=True} {passwordfile=/etc/pass.crt} {exclude=xx} {rsh}
+        salt '*' rsync.rsync {src} {dst} {delete=True} {excludefrom=/xx.ini} {rsh}
     '''
     if not src:
         src = __salt__['config.option']('rsync.src')
@@ -82,13 +100,18 @@ def rsync(src,
         exclude = __salt__['config.option']('rsync.exclude')
     if not excludefrom:
         excludefrom = __salt__['config.option']('rsync.excludefrom')
+    if not dryrun:
+        dryrun = __salt__['config.option']('rsync.dryrun')
+    if not rsh:
+        rsh = __salt__['config.option']('rsync.rsh')
     if not src or not dst:
         raise SaltInvocationError('src and dst cannot be empty')
 
-    option = _check(delete, force, update, passwordfile, exclude, excludefrom)
+    option = _check(delete, force, update, passwordfile, exclude, excludefrom, dryrun, rsh)
     cmd = ['rsync'] + option + [src, dst]
+    log.debug('Running rsync command: {0}'.format(cmd))
     try:
-        return __salt__['cmd.run'](cmd, python_shell=False)
+        return __salt__['cmd.run_all'](cmd, python_shell=False)
     except (IOError, OSError) as exc:
         raise CommandExecutionError(exc.strerror)
 

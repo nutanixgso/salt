@@ -10,6 +10,7 @@ This section contains a list of the Python modules that are used to extend the v
 
     ../ref/auth/all/index
     ../ref/beacons/all/index
+    ../ref/cache/all/index
     ../ref/engines/all/index
     ../ref/file_server/all/index
     ../ref/grains/all/index
@@ -26,5 +27,6 @@ This section contains a list of the Python modules that are used to extend the v
     ../ref/sdb/all/index
     ../ref/serializers/all/index
     ../ref/states/all/index
+    ../ref/thorium/all/index
     ../ref/tops/all/index
     ../ref/wheel/all/index

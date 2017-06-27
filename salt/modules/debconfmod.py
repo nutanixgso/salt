@@ -11,6 +11,7 @@ import re
 
 # Import salt libs
 import salt.utils
+import salt.utils.files
 
 log = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def set_(package, question, type, value, *extra):
     if extra:
         value = ' '.join((value,) + tuple(extra))
 
-    fd_, fname = salt.utils.mkstemp(prefix="salt-", close_fd=False)
+    fd_, fname = salt.utils.files.mkstemp(prefix="salt-", close_fd=False)
 
     line = "{0} {1} {2} {3}".format(package, question, type, value)
     os.write(fd_, line)
@@ -187,7 +188,7 @@ def set_file(path, saltenv='base', **kwargs):
             'Oxygen',
             'Parameter \'__env__\' has been detected in the argument list.  This '
             'parameter is no longer used and has been replaced by \'saltenv\' '
-            'as of Salt Carbon.  This warning will be removed in Salt Oxygen.'
+            'as of Salt 2016.11.0.  This warning will be removed in Salt Oxygen.'
             )
         kwargs.pop('__env__')
 

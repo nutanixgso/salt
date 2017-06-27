@@ -89,7 +89,18 @@ class CacheDisk(CacheDict):
     def __init__(self, ttl, path, *args, **kwargs):
         super(CacheDisk, self).__init__(ttl, *args, **kwargs)
         self._path = path
-        self._dict = self._read()
+        self._dict = {}
+        self._read()
+
+    def _enforce_ttl_key(self, key):
+        '''
+        Enforce the TTL to a specific key, delete if its past TTL
+        '''
+        if key not in self._key_cache_time:
+            return
+        if time.time() - self._key_cache_time[key] > self._ttl:
+            del self._key_cache_time[key]
+            self._dict.__delitem__(key)
 
     def __contains__(self, key):
         self._enforce_ttl_key(key)
@@ -111,16 +122,33 @@ class CacheDisk(CacheDict):
         # Do the same as the parent but also persist
         self._write()
 
+    def __delitem__(self, key):
+        '''
+        Make sure to remove the key cache time
+        '''
+        del self._key_cache_time[key]
+        self._dict.__delitem__(key)
+        # Do the same as the parent but also persist
+        self._write()
+
     def _read(self):
         '''
         Read in from disk
         '''
         if not HAS_MSGPACK or not os.path.exists(self._path):
-            return {}
-        with salt.utils.fopen(self._path, 'r') as fp_:
-            cache = msgpack.load(fp_)
-        log.debug('Disk cache retreive: {0}'.format(cache))
-        return cache
+            return
+        with salt.utils.fopen(self._path, 'rb') as fp_:
+            cache = msgpack.load(fp_, encoding=__salt_system_encoding__)
+        if "CacheDisk_cachetime" in cache:  # new format
+            self._dict = cache["CacheDisk_data"]
+            self._key_cache_time = cache["CacheDisk_cachetime"]
+        else:  # old format
+            self._dict = cache
+            timestamp = os.path.getmtime(self._path)
+            for key in self._dict:
+                self._key_cache_time[key] = timestamp
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug('Disk cache retrieved: {0}'.format(cache))
 
     def _write(self):
         '''
@@ -130,8 +158,12 @@ class CacheDisk(CacheDict):
             return
         # TODO Add check into preflight to ensure dir exists
         # TODO Dir hashing?
-        with salt.utils.fopen(self._path, 'w+') as fp_:
-            msgpack.dump(self._dict, fp_)
+        with salt.utils.fopen(self._path, 'wb+') as fp_:
+            cache = {
+                "CacheDisk_data": self._dict,
+                "CacheDisk_cachetime": self._key_cache_time
+            }
+            msgpack.dump(cache, fp_, use_bin_type=True)
 
 
 class CacheCli(object):

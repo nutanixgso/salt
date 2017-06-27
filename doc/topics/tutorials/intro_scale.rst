@@ -1,3 +1,5 @@
+.. _tutorial-salt-at-scale:
+
 ===================
 Using Salt at scale
 ===================
@@ -106,13 +108,14 @@ the sample configuration file (default values)
 
 .. code-block:: yaml
 
-    recon_default: 100ms
+    recon_default: 1000
     recon_max: 5000
     recon_randomize: True
 
-
-- recon_default: the default value the socket should use, i.e. 100ms
+- recon_default: the default value the socket should use, i.e. 1000. This value is in
+  milliseconds. (1000ms = 1 second)
 - recon_max: the max value that the socket should use as a delay before trying to reconnect
+  This value is in milliseconds. (5000ms = 5 seconds)
 - recon_randomize: enables randomization between recon_default and recon_max
 
 To tune this values to an existing environment, a few decision have to be made.
@@ -255,7 +258,7 @@ the retention time defined by
 
 .. code-block:: text
 
-    250 jobs/day * 2000 minions returns = 500.000 files a day
+    250 jobs/day * 2000 minions returns = 500,000 files a day
 
 If no job history is needed, the job cache can be disabled:
 
@@ -270,3 +273,17 @@ If the job cache is necessary there are (currently) 2 options:
   into a returner (not sent through the Master)
 - master_job_cache (New in `2014.7.0`): this will make the Master store the job
   data using a returner (instead of the local job cache on disk).
+
+If a master has many accepted keys, it may take a long time to publish a job
+because the master much first determine the matching minions and deliver
+that information back to the waiting client before the job can be published.
+
+To mitigate this, a key cache may be enabled. This will reduce the load
+on the master to a single file open instead of thousands or tens of thousands.
+
+This cache is updated by the maintanence process, however, which means that
+minions with keys that are accepted may not be targeted by the master
+for up to sixty seconds by default.
+
+To enable the master key cache, set `key_cache: 'sched'` in the master
+configuration file.

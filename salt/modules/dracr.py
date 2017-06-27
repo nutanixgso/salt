@@ -4,7 +4,6 @@ Manage Dell DRAC.
 
 .. versionadded:: 2015.8.2
 '''
-# pylint: disable=W0141
 
 # Import python libs
 from __future__ import absolute_import
@@ -27,7 +26,7 @@ __proxyenabled__ = ['fx2']
 
 try:
     run_all = __salt__['cmd.run_all']
-except NameError:
+except (NameError, KeyError):
     import salt.modules.cmdmod
     __salt__ = {
         'cmd.run_all': salt.modules.cmdmod._run_all_quiet
@@ -548,7 +547,7 @@ def create_user(username, password, permissions,
 
     .. code-block:: bash
 
-        salt dell dracr.create_user [USERNAME] [PASSWORD] [PRIVELEGES]
+        salt dell dracr.create_user [USERNAME] [PASSWORD] [PRIVILEGES]
         salt dell dracr.create_user diana secret login,test_alerts,clear_logs
 
     DRAC Privileges
@@ -616,7 +615,7 @@ def set_permissions(username, permissions,
 
     .. code-block:: bash
 
-        salt dell dracr.set_permissions [USERNAME] [PRIVELEGES]
+        salt dell dracr.set_permissions [USERNAME] [PRIVILEGES]
              [USER INDEX - optional]
         salt dell dracr.set_permissions diana login,test_alerts,clear_logs 4
 

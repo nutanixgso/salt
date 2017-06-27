@@ -6,7 +6,7 @@ Common resources for LXC and systemd-nspawn containers
 
 These functions are not designed to be called directly, but instead from the
 :mod:`lxc <salt.modules.lxc>`, :mod:`nspawn <salt.modules.nspawn>`, and
-:mod:`dockerng <salt.modules.dockerng>` execution modules. They provide for
+:mod:`docker <salt.modules.docker>` execution modules. They provide for
 common logic to be re-used for common actions.
 '''
 
@@ -40,7 +40,7 @@ def _validate(wrapped):
         container_type = kwargs.get('container_type')
         exec_driver = kwargs.get('exec_driver')
         valid_driver = {
-            'dockerng': ('lxc-attach', 'nsenter', 'docker-exec'),
+            'docker': ('lxc-attach', 'nsenter', 'docker-exec'),
             'lxc': ('lxc-attach',),
             'nspawn': ('nsenter',),
         }
@@ -220,19 +220,19 @@ def run(name,
                                  ignore_retcode=ignore_retcode)
     else:
         stdout, stderr = '', ''
+        proc = vt.Terminal(
+            full_cmd,
+            shell=python_shell,
+            log_stdin_level='quiet' if output_loglevel == 'quiet' else 'info',
+            log_stdout_level=output_loglevel,
+            log_stderr_level=output_loglevel,
+            log_stdout=True,
+            log_stderr=True,
+            stream_stdout=False,
+            stream_stderr=False
+        )
+        # Consume output
         try:
-            proc = vt.Terminal(full_cmd,
-                               shell=python_shell,
-                               log_stdin_level=output_loglevel if
-                                               output_loglevel == 'quiet'
-                                               else 'info',
-                               log_stdout_level=output_loglevel,
-                               log_stderr_level=output_loglevel,
-                               log_stdout=True,
-                               log_stderr=True,
-                               stream_stdout=False,
-                               stream_stderr=False)
-            # Consume output
             while proc.has_unread_data:
                 try:
                     cstdout, cstderr = proc.recv()

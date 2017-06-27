@@ -45,12 +45,14 @@ To override individual configuration items, append --return_kwargs '{"key:": "va
     salt '*' test.ping --return redis --return_kwargs '{"db": "another-salt"}'
 
 '''
-from __future__ import absolute_import
 
 # Import python libs
+from __future__ import absolute_import
 import json
 
 # Import Salt libs
+import salt.ext.six as six
+import salt.utils
 import salt.utils.jid
 import salt.returners
 
@@ -67,7 +69,8 @@ __virtualname__ = 'redis'
 
 def __virtual__():
     if not HAS_REDIS:
-        return False
+        return False, 'Could not import redis returner; ' \
+                      'redis python client is not installed.'
     return __virtualname__
 
 
@@ -78,6 +81,13 @@ def _get_options(ret=None):
     attrs = {'host': 'host',
              'port': 'port',
              'db': 'db'}
+
+    if salt.utils.is_proxy():
+        return {
+            'host': __opts__.get('redis.host', 'salt'),
+            'port': __opts__.get('redis.port', 6379),
+            'db': __opts__.get('redis.db', '0')
+        }
 
     _options = salt.returners.get_returner_options(__virtualname__,
                                                    ret,
@@ -103,7 +113,7 @@ def _get_serv(ret=None):
 
 
 def _get_ttl():
-    return __opts__['keep_jobs'] * 3600
+    return __opts__.get('keep_jobs', 24) * 3600
 
 
 def returner(ret):
@@ -120,12 +130,19 @@ def returner(ret):
     pipeline.execute()
 
 
-def save_load(jid, load):
+def save_load(jid, load, minions=None):
     '''
     Save the load to the specified jid
     '''
     serv = _get_serv(ret=None)
     serv.setex('load:{0}'.format(jid), json.dumps(load), _get_ttl())
+
+
+def save_minions(jid, minions, syndic_id=None):  # pylint: disable=unused-argument
+    '''
+    Included for API consistency
+    '''
+    pass
 
 
 def get_load(jid):
@@ -145,7 +162,7 @@ def get_jid(jid):
     '''
     serv = _get_serv(ret=None)
     ret = {}
-    for minion, data in serv.hgetall('ret:{0}'.format(jid)).iteritems():
+    for minion, data in six.iteritems(serv.hgetall('ret:{0}'.format(jid))):
         if data:
             ret[minion] = json.loads(data)
     return ret
@@ -197,6 +214,11 @@ def get_minions():
 def clean_old_jobs():
     '''
     Clean out minions's return data for old jobs.
+
+    Normally, hset 'ret:<jid>' are saved with a TTL, and will eventually
+    get cleaned by redis.But for jobs with some very late minion return, the
+    corresponding hset's TTL will be refreshed to a too late timestamp, we'll
+    do manually cleaning here.
     '''
     serv = _get_serv(ret=None)
     living_jids = set(serv.keys('load:*'))
@@ -205,7 +227,8 @@ def clean_old_jobs():
         load_key = ret_key.replace('ret:', 'load:', 1)
         if load_key not in living_jids:
             to_remove.append(ret_key)
-    serv.delete(**to_remove)
+    if len(to_remove) != 0:
+        serv.delete(*to_remove)
 
 
 def prep_jid(nocache=False, passed_jid=None):  # pylint: disable=unused-argument

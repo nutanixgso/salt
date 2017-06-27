@@ -89,7 +89,7 @@ __virtualname__ = 'mongo'
 
 def __virtual__():
     if not HAS_PYMONGO:
-        return False
+        return False, 'Could not import mongo returner; pymongo is not installed.'
     return 'mongo_return'
 
 
@@ -232,3 +232,10 @@ def prep_jid(nocache=False, passed_jid=None):  # pylint: disable=unused-argument
     Do any work necessary to prepare a JID, including sending a custom id
     '''
     return passed_jid if passed_jid is not None else salt.utils.jid.gen_jid()
+
+
+def save_minions(jid, minions, syndic_id=None):  # pylint: disable=unused-argument
+    '''
+    Included for API consistency
+    '''
+    pass

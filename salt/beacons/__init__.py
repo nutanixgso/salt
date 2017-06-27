@@ -13,6 +13,7 @@ import salt.loader
 import salt.utils
 import salt.utils.minion
 from salt.ext.six.moves import map
+from salt.exceptions import CommandExecutionError
 
 log = logging.getLogger(__name__)
 
@@ -23,18 +24,21 @@ class Beacon(object):
     '''
     def __init__(self, opts, functions):
         self.opts = opts
+        self.functions = functions
         self.beacons = salt.loader.beacons(opts, functions)
         self.interval_map = dict()
 
-    def process(self, config):
+    def process(self, config, grains):
         '''
         Process the configured beacons
+
         The config must be a list and looks like this in yaml
-        code_block:: yaml
+
+        .. code_block:: yaml
             beacons:
-                inotify:
-                    - /etc/fstab: {}
-                    - /var/cache/foo: {}
+              inotify:
+                - /etc/fstab: {}
+                - /var/cache/foo: {}
         '''
         ret = []
         b_config = copy.deepcopy(config)
@@ -50,10 +54,6 @@ class Beacon(object):
                 current_beacon_config = {}
                 list(map(current_beacon_config.update, config[mod]))
             elif isinstance(config[mod], dict):
-                salt.utils.warn_until(
-                    'Nitrogen',
-                    'Beacon configuration should be a list instead of a dictionary.'
-                )
                 current_beacon_config = config[mod]
 
             if 'enabled' in current_beacon_config:
@@ -70,6 +70,7 @@ class Beacon(object):
             log.trace('Beacon processing: {0}'.format(mod))
             fun_str = '{0}.beacon'.format(mod)
             if fun_str in self.beacons:
+                runonce = self._determine_beacon_config(current_beacon_config, 'run_once')
                 interval = self._determine_beacon_config(current_beacon_config, 'interval')
                 if interval:
                     b_config = self._trim_config(b_config, mod, 'interval')
@@ -85,8 +86,15 @@ class Beacon(object):
                         if re.match('state.*', job['fun']):
                             is_running = True
                     if is_running:
-                        log.info('Skipping beacon {0}. State run in progress.'.format(mod))
+                        close_str = '{0}.close'.format(mod)
+                        if close_str in self.beacons:
+                            log.info('Closing beacon {0}. State run in progress.'.format(mod))
+                            self.beacons[close_str](b_config[mod])
+                        else:
+                            log.info('Skipping beacon {0}. State run in progress.'.format(mod))
                         continue
+                # Update __grains__ on the beacon
+                self.beacons[fun_str].__globals__['__grains__'] = grains
                 # Fire the beacon!
                 raw = self.beacons[fun_str](b_config[mod])
                 for data in raw:
@@ -96,8 +104,10 @@ class Beacon(object):
                     if 'id' not in data:
                         data['id'] = self.opts['id']
                     ret.append({'tag': tag, 'data': data})
+                if runonce:
+                    self.disable_beacon(mod)
             else:
-                log.debug('Unable to process beacon {0}'.format(mod))
+                log.warning('Unable to process beacon {0}'.format(mod))
         return ret
 
     def _trim_config(self, b_config, mod, key):
@@ -182,6 +192,8 @@ class Beacon(object):
         '''
         # Fire the complete event back along with the list of beacons
         evt = salt.utils.event.get_event('minion', opts=self.opts)
+        b_conf = self.functions['config.merge']('beacons')
+        self.opts['beacons'].update(b_conf)
         evt.fire_event({'complete': True, 'beacons': self.opts['beacons']},
                        tag='/salt/minion/minion_beacons_list_complete')
 

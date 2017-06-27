@@ -9,13 +9,16 @@ Module for managing the Salt beacons on a minion
 # Import Python libs
 from __future__ import absolute_import
 import difflib
+import logging
 import os
 import yaml
 
+# Import Salt libs
 import salt.utils
+import salt.utils.event
 from salt.ext.six.moves import map
 
-import logging
+# Get logging started
 log = logging.getLogger(__name__)
 
 __func_alias__ = {
@@ -38,6 +41,7 @@ def list_(return_yaml=True):
         salt '*' beacons.list
 
     '''
+    beacons = None
 
     try:
         eventer = salt.utils.event.get_event('minion', opts=__opts__)
@@ -405,13 +409,16 @@ def enable_beacon(name, **kwargs):
     if not name:
         ret['comment'] = 'Beacon name is required.'
         ret['result'] = False
+        return ret
 
     if 'test' in kwargs and kwargs['test']:
         ret['comment'] = 'Beacon {0} would be enabled.'.format(name)
     else:
-        if name not in list_(return_yaml=True):
+        _beacons = list_(return_yaml=False)
+        if name not in _beacons:
             ret['comment'] = 'Beacon {0} is not currently configured.'.format(name)
             ret['result'] = False
+            return ret
 
         try:
             eventer = salt.utils.event.get_event('minion', opts=__opts__)
@@ -455,13 +462,16 @@ def disable_beacon(name, **kwargs):
     if not name:
         ret['comment'] = 'Beacon name is required.'
         ret['result'] = False
+        return ret
 
     if 'test' in kwargs and kwargs['test']:
         ret['comment'] = 'Beacons would be enabled.'
     else:
-        if name not in list_(return_yaml=True):
+        _beacons = list_(return_yaml=False)
+        if name not in _beacons:
             ret['comment'] = 'Beacon {0} is not currently configured.'.format(name)
             ret['result'] = False
+            return ret
 
         try:
             eventer = salt.utils.event.get_event('minion', opts=__opts__)

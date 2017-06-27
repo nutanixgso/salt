@@ -1,6 +1,30 @@
 # -*- coding: utf-8 -*-
 '''
 Support for iptables
+
+Configuration Options
+---------------------
+
+The following options can be set in the :ref:`minion config
+<configuration-salt-minion>`, :ref:`minion grains<configuration-minion-grains>`
+, :ref:`minion pillar<configuration-minion-pillar>`, or
+`master config<configuration-salt-master>`.
+
+- ``iptables.save_filters``: List of REGEX strings to FILTER OUT matching lines
+
+    This is useful for filtering out chains, rules, etc that you do not
+    wish to persist, such as ephemeral Docker rules.
+
+    The default is to not filter out anything.
+
+    .. code-block:: yaml
+
+        iptables.save_filters:
+           - "-j CATTLE_PREROUTING"
+           - "-j DOCKER"
+           - "-A POSTROUTING"
+           - "-A CATTLE_POSTROUTING"
+           - "-A FORWARD"
 '''
 from __future__ import absolute_import
 
@@ -83,10 +107,65 @@ def _conf(family='ipv4'):
     elif __grains__['os_family'] == 'Suse':
         # SuSE does not seem to use separate files for IPv4 and IPv6
         return '/etc/sysconfig/scripts/SuSEfirewall2-custom'
+    elif __grains__['os'] == 'Alpine':
+        if family == 'ipv6':
+            return '/etc/iptables/rules6-save'
+        else:
+            return '/etc/iptables/rules-save'
     else:
         raise SaltException('Saving iptables to file is not' +
                             ' supported on {0}.'.format(__grains__['os']) +
                             ' Please file an issue with SaltStack')
+
+
+def _conf_save_filters():
+    '''
+    Return array of strings from `save_filters` in config.
+
+    This array will be pulled from minion config, minion grains,
+    minion pillar, or master config.  The default value returned is [].
+
+    .. code-block:: python
+
+        _conf_save_filters()
+    '''
+    config = __salt__['config.option']('iptables.save_filters', [])
+    return config
+
+
+def _regex_iptables_save(cmd_output, filters=None):
+    '''
+    Return string with `save_filter` regex entries removed.  For example:
+
+    If `filters` is not provided, it will be pulled from minion config,
+    minion grains, minion pillar, or master config. Default return value
+    if no filters found is the original cmd_output string.
+
+    .. code-block:: python
+
+        _regex_iptables_save(cmd_output, ['-A DOCKER*'])
+    '''
+    # grab RE compiled filters from context for performance
+    if 'iptables.save_filters' not in __context__:
+        __context__['iptables.save_filters'] = []
+        for pattern in filters or _conf_save_filters():
+            try:
+                __context__['iptables.save_filters']\
+                    .append(re.compile(pattern))
+            except re.error as e:
+                log.warning('Skipping regex rule: \'{0}\': {1}'
+                            .format(pattern, e))
+                continue
+
+    if len(__context__['iptables.save_filters']) > 0:
+        # line by line get rid of any regex matches
+        _filtered_cmd_output = \
+            [line for line in cmd_output.splitlines(True)
+             if not any(reg.search(line) for reg
+                        in __context__['iptables.save_filters'])]
+        return ''.join(_filtered_cmd_output)
+
+    return cmd_output
 
 
 def version(family='ipv4'):
@@ -194,22 +273,12 @@ def build_rule(table='filter', chain=None, command=None, position='', full=None,
         rule.append('{0}-o {1}'.format(maybe_add_negation('of'), kwargs['of']))
         del kwargs['of']
 
-    if 'protocol' in kwargs:
-        proto = kwargs['protocol']
-        proto_negation = maybe_add_negation('protocol')
-        del kwargs['protocol']
-    elif 'proto' in kwargs:
-        proto = kwargs['proto']
-        proto_negation = maybe_add_negation('proto')
-        del kwargs['proto']
-
-    if proto:
-        if proto.startswith('!') or proto.startswith('not'):
-            proto = re.sub(bang_not_pat, '', proto)
-            rule += '! '
-
-        rule.append('{0}-p {1}'.format(proto_negation, proto))
-        proto = True
+    for proto_arg in ('protocol', 'proto'):
+        if proto_arg in kwargs:
+            if not proto:
+                rule.append('{0}-p {1}'.format(maybe_add_negation(proto_arg), kwargs[proto_arg]))
+                proto = True
+            del kwargs[proto_arg]
 
     if 'match' in kwargs:
         match_value = kwargs['match']
@@ -217,8 +286,9 @@ def build_rule(table='filter', chain=None, command=None, position='', full=None,
             match_value = match_value.split(',')
         for match in match_value:
             rule.append('-m {0}'.format(match))
-            if 'name' in kwargs and match.strip() in ('pknock', 'quota2', 'recent'):
-                rule.append('--name {0}'.format(kwargs['name']))
+            if 'name_' in kwargs and match.strip() in ('pknock', 'quota2', 'recent'):
+                rule.append('--name {0}'.format(kwargs['name_']))
+                del kwargs['name_']
         del kwargs['match']
 
     if 'match-set' in kwargs:
@@ -415,18 +485,19 @@ def build_rule(table='filter', chain=None, command=None, position='', full=None,
     for after_jump_argument in after_jump_arguments:
         if after_jump_argument in kwargs:
             value = kwargs[after_jump_argument]
-            if any(ws_char in str(value) for ws_char in string.whitespace):
+            if value in (None, ''):  # options without arguments
+                after_jump.append('--{0}'.format(after_jump_argument))
+            elif any(ws_char in str(value) for ws_char in string.whitespace):
                 after_jump.append('--{0} "{1}"'.format(after_jump_argument, value))
             else:
                 after_jump.append('--{0} {1}'.format(after_jump_argument, value))
             del kwargs[after_jump_argument]
 
-    for item in kwargs:
-        rule.append(maybe_add_negation(item))
-        if len(item) == 1:
-            rule.append('-{0} {1}'.format(item, kwargs[item]))
-        else:
-            rule.append('--{0} {1}'.format(item, kwargs[item]))
+    for key, value in kwargs.items():
+        negation = maybe_add_negation(key)
+        flag = '-' if len(key) == 1 else '--'
+        value = '' if value in (None, '') else ' {0}'.format(value)
+        rule.append('{0}{1}{2}{3}'.format(negation, flag, key, value))
 
     rule += after_jump
 
@@ -583,6 +654,11 @@ def save(filename=None, family='ipv4'):
         os.makedirs(parent_dir)
     cmd = '{0}-save'.format(_iptables_cmd(family))
     ipt = __salt__['cmd.run'](cmd)
+
+    # regex out the output if configured with filters
+    if len(_conf_save_filters()) > 0:
+        ipt = _regex_iptables_save(ipt)
+
     out = __salt__['file.write'](filename, ipt)
     return out
 
@@ -803,7 +879,7 @@ def insert(table='filter', chain=None, position=None, rule=None, family='ipv4'):
         return 'Error: Rule needs to be specified'
 
     if position < 0:
-        rules = get_rules(family='ipv4')
+        rules = get_rules(family=family)
         size = len(rules[table][chain]['rules'])
         position = (size + position) + 1
         if position is 0:

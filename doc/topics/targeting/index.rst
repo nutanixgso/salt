@@ -33,7 +33,7 @@ be called to execute a function, or a specific kernel.
 
 Calling via a grain is done by passing the -G option to salt, specifying
 a grain and a glob expression to match the value of the grain. The syntax for
-the target is the grain key followed by a globexpression: "os:Arch*".
+the target is the grain key followed by a glob expression: "os:Arch*".
 
 .. code-block:: bash
 
@@ -48,21 +48,8 @@ grains.item salt function:
 
     salt '*' grains.items
 
-more info on using targeting with grains can be found :ref:`here
+More info on using targeting with grains can be found :ref:`here
 <targeting-grains>`.
-
-Targeting with Executions
-=========================
-
-As of 0.8.8 targeting with executions is still under heavy development and this
-documentation is written to reference the behavior of execution matching in the
-future.
-
-Execution matching allows for a primary function to be executed, and then based
-on the return of the primary function the main function is executed.
-
-Execution matching allows for matching minions based on any arbitrary running
-data on the minions.
 
 Compound Targeting
 ==================
@@ -70,8 +57,8 @@ Compound Targeting
 .. versionadded:: 0.9.5
 
 Multiple target interfaces can be used in conjunction to determine the command
-targets. These targets can then be combined using and or or statements. This
-is well defined with an example:
+targets. These targets can then be combined using ``and`` or ``or`` statements.
+This is well defined with an example:
 
 .. code-block:: bash
 
@@ -86,7 +73,7 @@ is used with ``G@`` as well as a regular expression with ``E@``. The
 ``webser*`` target does not need to be prefaced with a target type specifier
 because it is a glob.
 
-more info on using compound targeting can be found :ref:`here
+More info on using compound targeting can be found :ref:`here
 <targeting-compound>`.
 
 Node Group Targeting
@@ -106,6 +93,10 @@ shorthand for having to type out complicated compound expressions.
       group1: 'L@foo.domain.com,bar.domain.com,baz.domain.com and bl*.domain.com'
       group2: 'G@os:Debian and foo.domain.com'
       group3: 'G@os:Debian and N@group1'
+
+
+Advanced Targeting Methods
+==========================
 
 There are many ways to target individual minions or groups of minions in Salt:
 

@@ -305,8 +305,8 @@ def load_states():
     # the loader expects to find pillar & grain data
     __opts__['grains'] = salt.loader.grains(__opts__)
     __opts__['pillar'] = __pillar__
-    lazy_funcs = salt.loader.minion_mods(__opts__)
     lazy_utils = salt.loader.utils(__opts__)
+    lazy_funcs = salt.loader.minion_mods(__opts__, utils=lazy_utils)
     lazy_serializers = salt.loader.serializers(__opts__)
     lazy_states = salt.loader.states(__opts__,
             lazy_funcs,
@@ -395,9 +395,10 @@ def render(template, saltenv='base', sls='', salt_data=True, **kwargs):
     # not salt state data
     Registry.enabled = False
 
-    def process_template(template, template_globals):
+    def process_template(template):
         template_data = []
-        state_globals = {}
+        # Do not pass our globals to the modules we are including and keep the root _globals untouched
+        template_globals = dict(_globals)
         for line in template.readlines():
             line = line.rstrip('\r\n')
             matched = False
@@ -416,19 +417,20 @@ def render(template, saltenv='base', sls='', salt_data=True, **kwargs):
 
                 state_file = client.cache_file(import_file, saltenv)
                 if not state_file:
-                    raise ImportError("Could not find the file {0!r}".format(import_file))
+                    raise ImportError(
+                        'Could not find the file \'{0}\''.format(import_file)
+                    )
 
-                state_locals = {}
                 with salt.utils.fopen(state_file) as state_fh:
-                    state_contents, state_locals = process_template(state_fh, template_globals)
-                exec_(state_contents, template_globals, state_locals)
+                    state_contents, state_globals = process_template(state_fh)
+                exec_(state_contents, state_globals)
 
                 # if no imports have been specified then we are being imported as: import salt://foo.sls
                 # so we want to stick all of the locals from our state file into the template globals
                 # under the name of the module -> i.e. foo.MapClass
                 if imports is None:
                     import_name = os.path.splitext(os.path.basename(state_file))[0]
-                    state_globals[import_name] = PyobjectsModule(import_name, state_locals)
+                    template_globals[import_name] = PyobjectsModule(import_name, state_globals)
                 else:
                     for name in imports:
                         name = alias = name.strip()
@@ -438,12 +440,14 @@ def render(template, saltenv='base', sls='', salt_data=True, **kwargs):
                             name = matches.group(1).strip()
                             alias = matches.group(2).strip()
 
-                        if name not in state_locals:
-                            raise ImportError("{0!r} was not found in {1!r}".format(
-                                name,
-                                import_file
-                            ))
-                        state_globals[alias] = state_locals[name]
+                        if name not in state_globals:
+                            raise ImportError(
+                                '\'{0}\' was not found in \'{1}\''.format(
+                                    name,
+                                    import_file
+                                )
+                            )
+                        template_globals[alias] = state_globals[name]
 
                 matched = True
                 break
@@ -451,11 +455,11 @@ def render(template, saltenv='base', sls='', salt_data=True, **kwargs):
             if not matched:
                 template_data.append(line)
 
-        return "\n".join(template_data), state_globals
+        return "\n".join(template_data), template_globals
 
     # process the template that triggered the render
-    final_template, final_locals = process_template(template, _globals)
-    _globals.update(final_locals)
+    final_template, final_globals = process_template(template)
+    _globals.update(final_globals)
 
     # re-enable the registry
     Registry.enabled = True

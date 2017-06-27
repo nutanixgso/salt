@@ -453,7 +453,7 @@ def update():
             os.makedirs(env_cachedir)
         new_envs = envs(ignore_cache=True)
         serial = salt.payload.Serial(__opts__)
-        with salt.utils.fopen(env_cache, 'w+') as fp_:
+        with salt.utils.fopen(env_cache, 'wb+') as fp_:
             fp_.write(serial.dumps(new_envs))
             log.trace('Wrote env cache data to {0}'.format(env_cache))
 
@@ -583,6 +583,22 @@ def find_file(path, tgt_env='base', **kwargs):  # pylint: disable=W0613
         if os.path.isfile(full):
             fnd['rel'] = path
             fnd['path'] = full
+            try:
+                # Converting the stat result to a list, the elements of the
+                # list correspond to the following stat_result params:
+                # 0 => st_mode=33188
+                # 1 => st_ino=10227377
+                # 2 => st_dev=65026
+                # 3 => st_nlink=1
+                # 4 => st_uid=1000
+                # 5 => st_gid=1000
+                # 6 => st_size=1056233
+                # 7 => st_atime=1468284229
+                # 8 => st_mtime=1456338235
+                # 9 => st_ctime=1456338235
+                fnd['stat'] = list(os.stat(full))
+            except Exception:
+                pass
             return fnd
     return fnd
 
@@ -596,7 +612,7 @@ def serve_file(load, fnd):
             'Oxygen',
             'Parameter \'env\' has been detected in the argument list.  This '
             'parameter is no longer used and has been replaced by \'saltenv\' '
-            'as of Salt Carbon.  This warning will be removed in Salt Oxygen.'
+            'as of Salt 2016.11.0.  This warning will be removed in Salt Oxygen.'
             )
         load.pop('env')
 
@@ -608,9 +624,12 @@ def serve_file(load, fnd):
         return ret
     ret['dest'] = fnd['rel']
     gzip = load.get('gzip', None)
-    with salt.utils.fopen(fnd['path'], 'rb') as fp_:
+    fpath = os.path.normpath(fnd['path'])
+    with salt.utils.fopen(fpath, 'rb') as fp_:
         fp_.seek(load['loc'])
         data = fp_.read(__opts__['file_buffer_size'])
+        if data and six.PY3 and not salt.utils.is_bin_file(fpath):
+            data = data.decode(__salt_system_encoding__)
         if gzip and data:
             data = salt.utils.gzip_util.compress(data, gzip)
             ret['gzip'] = gzip
@@ -627,7 +646,7 @@ def file_hash(load, fnd):
             'Oxygen',
             'Parameter \'env\' has been detected in the argument list.  This '
             'parameter is no longer used and has been replaced by \'saltenv\' '
-            'as of Salt Carbon.  This warning will be removed in Salt Oxygen.'
+            'as of Salt 2016.11.0.  This warning will be removed in Salt Oxygen.'
             )
         load.pop('env')
 
@@ -685,7 +704,7 @@ def _file_lists(load, form):
             'Oxygen',
             'Parameter \'env\' has been detected in the argument list.  This '
             'parameter is no longer used and has been replaced by \'saltenv\' '
-            'as of Salt Carbon.  This warning will be removed in Salt Oxygen.'
+            'as of Salt 2016.11.0.  This warning will be removed in Salt Oxygen.'
             )
         load.pop('env')
 

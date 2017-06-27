@@ -4,8 +4,14 @@ Connection module for Amazon CloudTrail
 
 .. versionadded:: 2016.3.0
 
+:depends:
+    - boto
+    - boto3
+
+The dependencies listed above can be installed via package or pip.
+
 :configuration: This module accepts explicit Lambda credentials but can also
-    utilize IAM roles assigned to the instance trough Instance Profiles.
+    utilize IAM roles assigned to the instance through Instance Profiles.
     Dynamic credentials are then automatically obtained from AWS API and no
     further configuration is necessary. More Information available at:
 
@@ -39,8 +45,6 @@ Connection module for Amazon CloudTrail
             key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
             region: us-east-1
 
-:depends: boto3
-
 '''
 # keep lint from choking on _get_conn and _cache_id
 #pylint: disable=E0602
@@ -48,12 +52,13 @@ Connection module for Amazon CloudTrail
 # Import Python libs
 from __future__ import absolute_import
 import logging
-from distutils.version import LooseVersion as _LooseVersion  # pylint: disable=import-error,no-name-in-module
 
 # Import Salt libs
+import salt.ext.six as six
 import salt.utils.boto3
 import salt.utils.compat
 import salt.utils
+from salt.utils.versions import LooseVersion as _LooseVersion
 
 log = logging.getLogger(__name__)
 
@@ -83,9 +88,10 @@ def __virtual__():
     # which was added in boto 2.8.0
     # https://github.com/boto/boto/commit/33ac26b416fbb48a60602542b4ce15dcc7029f12
     if not HAS_BOTO:
-        return False
+        return (False, 'The boto_cloudtrial module could not be loaded: boto libraries not found')
     elif _LooseVersion(boto3.__version__) < _LooseVersion(required_boto3_version):
-        return False
+        return (False, 'The boto_cloudtrial module could not be loaded: '
+                'boto version {0} or later must be installed.'.format(required_boto3_version))
     else:
         return True
 
@@ -424,7 +430,7 @@ def add_tags(Name,
     try:
         conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
         tagslist = []
-        for k, v in kwargs.iteritems():
+        for k, v in six.iteritems(kwargs):
             if str(k).startswith('__'):
                 continue
             tagslist.append({'Key': str(k), 'Value': str(v)})
@@ -455,7 +461,7 @@ def remove_tags(Name,
     try:
         conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
         tagslist = []
-        for k, v in kwargs.iteritems():
+        for k, v in six.iteritems(kwargs):
             if str(k).startswith('__'):
                 continue
             tagslist.append({'Key': str(k), 'Value': str(v)})

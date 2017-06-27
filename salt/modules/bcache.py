@@ -282,10 +282,11 @@ def cache_make(dev, reserved=None, force=False, block_size=None, bucket_size=Non
         salt '*' bcache.cache_make sdb reserved=10% block_size=4096
 
 
-    :param reserved: if dev is a full device, create a partitition table with this size empty.
-    .. note::
-      this increases the amount of reserved space available to SSD garbage collectors,
-      potentially (vastly) increasing performance
+    :param reserved: if dev is a full device, create a partition table with this size empty.
+
+        .. note::
+              this increases the amount of reserved space available to SSD garbage collectors,
+              potentially (vastly) increasing performance
     :param block_size: Block size of the cache; defaults to devices' logical block size
     :param force: Overwrite existing BCache sets
     :param attach: Attach all existing backend devices immediately
@@ -400,7 +401,7 @@ def config_(dev=None, **kwargs):
             if key in data:
                 del data[key]
 
-        for key in data.keys():
+        for key in data:
             result.update(data[key])
 
         return result
@@ -440,7 +441,7 @@ def status(stats=False, config=False, internals=False, superblock=False, alldevs
     cdev = _bdev()
     if cdev:
         count = 0
-        for dev in statii.keys():
+        for dev in statii:
             if dev != cdev:
                 # it's a backing dev
                 if statii[dev]['cache'] == cuuid:
@@ -518,7 +519,7 @@ def device(dev, stats=False, config=False, internals=False, superblock=False):
     if 'stats' in result:
         replre = r'(stats|cache)_'
         statres = result['stats']
-        for attr in result['stats'].keys():
+        for attr in result['stats']:
             if '/' not in attr:
                 key = re.sub(replre, '', attr)
                 statres[key] = statres.pop(attr)
@@ -536,7 +537,7 @@ def device(dev, stats=False, config=False, internals=False, superblock=False):
         interres = result.pop('inter_ro', {})
         interres.update(result.pop('inter_rw', {}))
         if len(interres):
-            for key in interres.keys():
+            for key in interres:
                 if key.startswith('internal'):
                     nkey = re.sub(r'internal[s/]*', '', key)
                     interres[nkey] = interres.pop(key)
@@ -551,7 +552,7 @@ def device(dev, stats=False, config=False, internals=False, superblock=False):
     # ---------------- Config ----------------
     if config:
         configres = result['config']
-        for key in configres.keys():
+        for key in configres:
             if key.startswith('writeback'):
                 mkey, skey = re.split(r'_', key, maxsplit=1)
                 if mkey not in configres:
@@ -766,7 +767,7 @@ def _sysfs_parse(path, base_attr=None, stats=False, config=False, internals=Fals
             bintf[key].append(intf)
 
     if base_attr is not None:
-        for intf in bintf.keys():
+        for intf in bintf:
             bintf[intf] = [sintf for sintf in bintf[intf] if sintf not in base_attr]
         bintf['base'] = base_attr
 

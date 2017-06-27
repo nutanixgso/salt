@@ -11,8 +11,8 @@ until 2015.8.0. The `salt.utils.compat.pack_dunder` helper function
 provides backwards compatibility.
 
 This module provides common functionality for the boto execution modules.
-The expected usage is to call `apply_funcs` from the `__virtual__` function
-of the module. This will bring properly initilized partials of  `_get_conn`
+The expected usage is to call `assign_funcs` from the `__virtual__` function
+of the module. This will bring properly initialized partials of  `_get_conn`
 and `_cache_id` into the module's namespace.
 
 Example Usage:
@@ -25,7 +25,7 @@ Example Usage:
             # only required in 2015.2
             salt.utils.compat.pack_dunder(__name__)
 
-            __utils__['boto.apply_funcs'](__name__, 'vpc')
+            __utils__['boto.assign_funcs'](__name__, 'vpc')
 
         def test():
             conn = _get_conn()
@@ -39,13 +39,15 @@ from __future__ import absolute_import
 import hashlib
 import logging
 import sys
-from distutils.version import LooseVersion as _LooseVersion  # pylint: disable=import-error,no-name-in-module
 from functools import partial
+from salt.loader import minion_mods
 
 # Import salt libs
-from salt.ext.six import string_types  # pylint: disable=import-error
+import salt.ext.six as six
 from salt.ext.six.moves import range  # pylint: disable=import-error,redefined-builtin
 from salt.exceptions import SaltInvocationError
+from salt.utils.versions import LooseVersion as _LooseVersion
+import salt.utils
 
 # Import third party libs
 # pylint: disable=import-error
@@ -63,7 +65,7 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-__salt__ = {}
+__salt__ = None
 
 
 def __virtual__():
@@ -78,18 +80,21 @@ def __virtual__():
     elif _LooseVersion(boto.__version__) < _LooseVersion(required_boto_version):
         return False
     else:
+        global __salt__
+        if not __salt__:
+            __salt__ = minion_mods(__opts__)
         return True
 
 
 def _get_profile(service, region, key, keyid, profile):
     if profile:
-        if isinstance(profile, string_types):
+        if isinstance(profile, six.string_types):
             _profile = __salt__['config.option'](profile)
         elif isinstance(profile, dict):
             _profile = profile
         key = _profile.get('key', None)
         keyid = _profile.get('keyid', None)
-        region = _profile.get('region', None)
+        region = _profile.get('region', region or None)
     if not region and __salt__['config.option'](service + '.region'):
         region = __salt__['config.option'](service + '.region')
 
@@ -102,7 +107,10 @@ def _get_profile(service, region, key, keyid, profile):
 
     label = 'boto_{0}:'.format(service)
     if keyid:
-        cxkey = label + hashlib.md5(region + keyid + key).hexdigest()
+        hash_string = region + keyid + key
+        if six.PY3:
+            hash_string = salt.utils.to_bytes(hash_string)
+        cxkey = label + hashlib.md5(hash_string).hexdigest()
     else:
         cxkey = label + region
 
@@ -171,8 +179,9 @@ def get_connection(service, module=None, region=None, key=None, keyid=None,
     '''
 
     module = module or service
+    module, submodule = ('boto.' + module).rsplit('.', 1)
 
-    svc_mod = __import__('boto.' + module, fromlist=[module])
+    svc_mod = getattr(__import__(module, fromlist=[submodule]), submodule)
 
     cxkey, region, key, keyid = _get_profile(service, region, key,
                                              keyid, profile)

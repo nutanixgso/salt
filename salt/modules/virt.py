@@ -24,7 +24,6 @@ from xml.etree import ElementTree
 import yaml
 import jinja2
 import jinja2.exceptions
-from xml.dom import minidom
 import salt.ext.six as six
 from salt.ext.six.moves import StringIO as _StringIO  # pylint: disable=import-error
 from xml.dom import minidom
@@ -238,7 +237,7 @@ def _gen_xml(name,
     Generate the XML string to define a libvirt VM
     '''
     hypervisor = 'vmware' if hypervisor == 'esxi' else hypervisor
-    mem = mem * 1024  # MB
+    mem = int(mem) * 1024  # MB
     context = {
         'hypervisor': hypervisor,
         'name': name,
@@ -562,6 +561,7 @@ def init(name,
          priv_key=None,
          seed_cmd='seed.apply',
          enable_vnc=False,
+         enable_qcow=False,
          **kwargs):
     '''
     Initialize a new vm
@@ -571,6 +571,7 @@ def init(name,
     .. code-block:: bash
 
         salt 'hypervisor' virt.init vm_name 4 512 salt://path/to/image.raw
+        salt 'hypervisor' virt.init vm_name 4 512 /var/lib/libvirt/images/img.raw
         salt 'hypervisor' virt.init vm_name 4 512 nic=profile disk=profile
     '''
     hypervisor = __salt__['config.get']('libvirt:hypervisor', hypervisor)
@@ -604,23 +605,39 @@ def init(name,
             )
         elif hypervisor in ['qemu', 'kvm']:
             img_dir = __salt__['config.option']('virt.images')
+            log.debug('Image directory from config option `virt.images` is {0}'
+                      .format(img_dir))
             img_dest = os.path.join(
                 img_dir,
                 name,
                 disk_file_name
             )
+            log.debug('Image destination will be {0}'.format(img_dest))
             img_dir = os.path.dirname(img_dest)
+            log.debug('Image destination directory is  {0}'.format(img_dir))
             sfn = __salt__['cp.cache_file'](image, saltenv)
-            log.debug('Image directory is {0}'.format(img_dir))
 
             try:
                 os.makedirs(img_dir)
             except OSError:
                 pass
 
+            qcow2 = False
+            if salt.utils.which('qemu-img'):
+                res = __salt__['cmd.run']('qemu-img info {}'.format(sfn))
+                imageinfo = yaml.load(res)
+                qcow2 = imageinfo['file format'] == 'qcow2'
+
             try:
-                log.debug('Copying {0} to {1}'.format(sfn, img_dest))
-                salt.utils.files.copyfile(sfn, img_dest)
+                if enable_qcow and qcow2:
+                    log.info('Cloning qcow2 image {} using copy on write'
+                              .format(sfn))
+                    __salt__['cmd.run'](
+                        'qemu-img create -f qcow2 -o backing_file={} {}'
+                        .format(sfn, img_dest).split())
+                else:
+                    log.debug('Copying {0} to {1}'.format(sfn, img_dest))
+                    salt.utils.files.copyfile(sfn, img_dest)
                 mask = os.umask(0)
                 os.umask(mask)
                 # Apply umask and remove exec bit
@@ -661,14 +678,18 @@ def init(name,
     xml = _gen_xml(name, cpu, mem, diskp, nicp, hypervisor, **kwargs)
     try:
         define_xml_str(xml)
-    except libvirtError:
-        # This domain already exists
-        pass
+    except libvirtError as err:
+        # check if failure is due to this domain already existing
+        if "domain '{}' already exists".format(name) in str(err):
+            # continue on to seeding
+            log.warning(err)
+        else:
+            raise err  # a real error we should report upwards
 
     if seed and seedable:
         log.debug('Seed command is {0}'.format(seed_cmd))
         __salt__[seed_cmd](
-            img_dest,
+           img_dest,
            id_=name,
            config=kwargs.get('config'),
            install=install,
@@ -1029,7 +1050,7 @@ def setmem(vm_, memory, config=False):
         salt '*' virt.setmem <domain> <size>
         salt '*' virt.setmem my_domain 768
     '''
-    if vm_state(vm_) != 'shutdown':
+    if vm_state(vm_)[vm_] != 'shutdown':
         return False
 
     dom = _get_domain(vm_)
@@ -1063,7 +1084,7 @@ def setvcpus(vm_, vcpus, config=False):
         salt '*' virt.setvcpus <domain> <amount>
         salt '*' virt.setvcpus my_domain 4
     '''
-    if vm_state(vm_) != 'shutdown':
+    if vm_state(vm_)[vm_] != 'shutdown':
         return False
 
     dom = _get_domain(vm_)
@@ -1320,9 +1341,11 @@ def create_xml_path(path):
 
         salt '*' virt.create_xml_path <path to XML file on the node>
     '''
-    if not os.path.isfile(path):
+    try:
+        with salt.utils.fopen(path, 'r') as fp_:
+            return create_xml_str(fp_.read())
+    except (OSError, IOError):
         return False
-    return create_xml_str(salt.utils.fopen(path, 'r').read())
 
 
 def define_xml_str(xml):
@@ -1350,9 +1373,11 @@ def define_xml_path(path):
         salt '*' virt.define_xml_path <path to XML file on the node>
 
     '''
-    if not os.path.isfile(path):
+    try:
+        with salt.utils.fopen(path, 'r') as fp_:
+            return define_xml_str(fp_.read())
+    except (OSError, IOError):
         return False
-    return define_xml_str(salt.utils.fopen(path, 'r').read())
 
 
 def define_vol_xml_str(xml):
@@ -1382,9 +1407,11 @@ def define_vol_xml_path(path):
         salt '*' virt.define_vol_xml_path <path to XML file on the node>
 
     '''
-    if not os.path.isfile(path):
+    try:
+        with salt.utils.fopen(path, 'r') as fp_:
+            return define_vol_xml_str(fp_.read())
+    except (OSError, IOError):
         return False
-    return define_vol_xml_str(salt.utils.fopen(path, 'r').read())
 
 
 def migrate_non_shared(vm_, target, ssh=False):
@@ -1574,8 +1601,9 @@ def is_kvm_hyper():
         salt '*' virt.is_kvm_hyper
     '''
     try:
-        if 'kvm_' not in salt.utils.fopen('/proc/modules').read():
-            return False
+        with salt.utils.fopen('/proc/modules') as fp_:
+            if 'kvm_' not in fp_.read():
+                return False
     except IOError:
         # No /proc/modules? Are we on Windows? Or Solaris?
         return False
@@ -1599,9 +1627,10 @@ def is_xen_hyper():
         # virtual_subtype isn't set everywhere.
         return False
     try:
-        if 'xen_' not in salt.utils.fopen('/proc/modules').read():
-            return False
-    except IOError:
+        with salt.utils.fopen('/proc/modules') as fp_:
+            if 'xen_' not in fp_.read():
+                return False
+    except (OSError, IOError):
         # No /proc/modules? Are we on Windows? Or Solaris?
         return False
     return 'libvirtd' in __salt__['cmd.run'](__grains__['ps'])
@@ -1974,58 +2003,6 @@ def revert_snapshot(name, snapshot=None, cleanup=False):
         ret['deleted'] = 'N/A'
 
     return ret
-
-
-# Deprecated aliases
-def create(domain):
-    '''
-    .. deprecated:: 2016.3.0
-       Use :py:func:`~salt.modules.virt.start` instead.
-
-    Start a defined domain
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' virt.create <domain>
-    '''
-    salt.utils.warn_until('Nitrogen', 'Use "virt.start" instead.')
-    return start(domain)
-
-
-def destroy(domain):
-    '''
-    .. deprecated:: 2016.3.0
-       Use :py:func:`~salt.modules.virt.stop` instead.
-
-    Power off a defined domain
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' virt.destroy <domain>
-    '''
-    salt.utils.warn_until('Nitrogen', 'Use "virt.stop" instead.')
-    return stop(domain)
-
-
-def list_vms():
-    '''
-    .. deprecated:: 2016.3.0
-       Use :py:func:`~salt.modules.virt.list_domains` instead.
-
-    List all virtual machines.
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' virt.list_vms <domain>
-    '''
-    salt.utils.warn_until('Nitrogen', 'Use "virt.list_domains" instead.')
-    return list_domains()
 
 
 def _capabilities():

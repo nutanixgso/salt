@@ -16,8 +16,8 @@ state_verbose:
     instruct the highstate outputter to omit displaying anything in green, this
     means that nothing with a result of True and no changes will not be printed
 state_output:
-    The highstate outputter has five output modes, ``full``, ``terse``,
-    ``mixed``, ``changes`` and ``filter``.
+    The highstate outputter has six output modes, ``full``, ``terse``,
+    ``mixed``, ``mixed_id``, ``changes`` and ``filter``.
 
     * The default is set to ``full``, which will display many lines of detailed
       information for each executed chunk.
@@ -25,21 +25,61 @@ state_output:
       only one line.
     * If ``mixed`` is used, then terse output will be used unless a state
       failed, in which case full output will be used.
+    * If ``mixed_id`` is used, then the mixed form will be used, but the value for ``name``
+      will be drawn from the state ID. This is useful for cases where the name
+      value might be very long and hard to read.
     * If ``changes`` is used, then terse output will be used if there was no
       error and no changes, otherwise full output will be used.
     * If ``filter`` is used, then either or both of two different filters can be
       used: ``exclude`` or ``terse``.
+      * for ``exclude``, state.highstate expects a list of states to be excluded
+        (or ``None``)
+        followed by ``True`` for terse output or ``False`` for regular output.
+        Because of parsing nuances, if only one of these is used, it must still
+        contain a comma. For instance: `exclude=True,`.
+      * for ``terse``, state.highstate expects simply ``True`` or ``False``.
       These can be set as such from the command line, or in the Salt config as
-      `state_output_exclude` or `state_output_terse`, respectively. The values to
-      exclude must be a comma-separated list of `True`, `False` and/or `None`.
-      Because of parsing nuances, if only one of these is used, it must still
-      contain a comma. For instance: `exclude=True,`.
+      `state_output_exclude` or `state_output_terse`, respectively.
 state_tabular:
     If `state_output` uses the terse output, set this to `True` for an aligned
     output format.  If you wish to use a custom format, this can be set to a
     string.
 
-Example output:
+Example usage:
+
+If ``state_output: filter`` is set in the configuration file:
+
+.. code-block:: bash
+
+    salt '*' state.highstate exclude=None,True
+
+
+means to exclude no states from the highstate and turn on terse output.
+
+.. code-block:: bash
+
+    salt twd state.highstate exclude=problemstate1,problemstate2,False
+
+
+means to exclude states ``problemstate1`` and ``problemstate2``
+from the highstate, and use regular output.
+
+Example output for the above highstate call when ``top.sls`` defines only
+one other state to apply to minion ``twd``:
+
+.. code-block:: text
+
+    twd:
+
+    Summary for twd
+    ------------
+    Succeeded: 1 (changed=1)
+    Failed:    0
+    ------------
+    Total states run:     1
+
+
+Example output with no special settings in configuration files:
 
 .. code-block:: text
 
@@ -80,11 +120,18 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def output(data):
+def output(data, **kwargs):  # pylint: disable=unused-argument
     '''
     The HighState Outputter is only meant to be used with the state.highstate
     function, or a function that returns highstate return data.
     '''
+    # Discard retcode in dictionary as present in orchestrate data
+    local_masters = [key for key in data.keys() if key.endswith('.local_master')]
+    orchestrator_output = 'retcode' in data.keys() and len(local_masters) == 1
+
+    if orchestrator_output:
+        del data['retcode']
+
     # If additional information is passed through via the "data" dictionary to
     # the highstate outputter, such as "outputter" or "retcode", discard it.
     # We only want the state data that was passed through, if it is wrapped up
@@ -93,8 +140,18 @@ def output(data):
     if 'data' in data:
         data = data.pop('data')
 
-    for host, hostdata in six.iteritems(data):
-        return _format_host(host, hostdata)[0]
+    ret = [
+        _format_host(host, hostdata)[0]
+        for host, hostdata in six.iteritems(data)
+    ]
+    if ret:
+        return "\n".join(ret)
+    log.error(
+        'Data passed to highstate outputter is not a valid highstate return: %s',
+        data
+    )
+    # We should not reach here, but if we do return empty string
+    return ''
 
 
 def _format_host(host, data):
@@ -132,7 +189,7 @@ def _format_host(host, data):
         # Verify that the needed data is present
         data_tmp = {}
         for tname, info in six.iteritems(data):
-            if isinstance(info, dict) and '__run_num__' not in info:
+            if isinstance(info, dict) and tname is not 'changes' and info and '__run_num__' not in info:
                 err = (u'The State execution failed to record the order '
                        'in which all states were executed. The state '
                        'return missing data is:')
@@ -151,19 +208,18 @@ def _format_host(host, data):
             rcounts[ret['result']] += 1
             rduration = ret.get('duration', 0)
             try:
-                float(rduration)
-                rdurations.append(rduration)
+                rdurations.append(float(rduration))
             except ValueError:
                 rduration, _, _ = rduration.partition(' ms')
                 try:
-                    float(rduration)
-                    rdurations.append(rduration)
+                    rdurations.append(float(rduration))
                 except ValueError:
                     log.error('Cannot parse a float from duration {0}'
                               .format(ret.get('duration', 0)))
 
             tcolor = colors['GREEN']
-            schanged, ctext = _format_changes(ret['changes'])
+            orchestration = ret.get('__orchestration__', False)
+            schanged, ctext = _format_changes(ret['changes'], orchestration)
             nchanges += 1 if schanged else 0
 
             # Skip this state if it was successful & diff output was requested
@@ -225,7 +281,10 @@ def _format_host(host, data):
                 msg = _format_terse(tcolor, comps, ret, colors, tabular)
                 hstrs.append(msg)
                 continue
-            elif __opts__.get('state_output', 'full').lower() == 'mixed':
+            elif __opts__.get('state_output', 'full').lower().startswith('mixed'):
+                if __opts__['state_output'] == 'mixed_id':
+                    # Swap in the ID for the name. Refs #35137
+                    comps[2] = comps[1]
                 # Print terse unless it failed
                 if ret['result'] is not False:
                     msg = _format_terse(tcolor, comps, ret, colors, tabular)
@@ -245,7 +304,7 @@ def _format_host(host, data):
                 u'    {tcolor}  Result: {ret[result]!s}{colors[ENDC]}',
                 u'    {tcolor} Comment: {comment}{colors[ENDC]}',
             ]
-            if __opts__.get('state_output_profile', True):
+            if __opts__.get('state_output_profile', True) and 'start_time' in ret:
                 state_lines.extend([
                     u'    {tcolor} Started: {ret[start_time]!s}{colors[ENDC]}',
                     u'    {tcolor}Duration: {ret[duration]!s}{colors[ENDC]}',
@@ -257,7 +316,10 @@ def _format_host(host, data):
             # be sure that ret['comment'] is utf-8 friendly
             try:
                 if not isinstance(ret['comment'], six.text_type):
-                    ret['comment'] = str(ret['comment']).decode('utf-8')
+                    if six.PY2:
+                        ret['comment'] = str(ret['comment']).decode('utf-8')
+                    else:
+                        ret['comment'] = salt.utils.to_str(ret['comment'])
             except UnicodeDecodeError:
                 # but try to continue on errors
                 pass
@@ -398,7 +460,7 @@ def _format_host(host, data):
                                                line_max_len - 7)
         hstrs.append(colorfmt.format(colors['CYAN'], totals, colors))
 
-        if __opts__.get('state_output_profile', False):
+        if __opts__.get('state_output_profile', True):
             sum_duration = sum(rdurations)
             duration_unit = 'ms'
             # convert to seconds if duration is 1000ms or more
@@ -416,14 +478,36 @@ def _format_host(host, data):
     return u'\n'.join(hstrs), nchanges > 0
 
 
-def _format_changes(changes):
+def _nested_changes(changes):
     '''
-    Format the changes dict based on what the data is
+    Print the changes data using the nested outputter
     '''
     global __opts__  # pylint: disable=W0601
 
+    opts = __opts__.copy()
+    # Pass the __opts__ dict. The loader will splat this modules __opts__ dict
+    # anyway so have to restore it after the other outputter is done
+    if __opts__['color']:
+        __opts__['color'] = u'CYAN'
+    ret = u'\n'
+    ret += salt.output.out_format(
+            changes,
+            'nested',
+            __opts__,
+            nested_indent=14)
+    __opts__ = opts
+    return ret
+
+
+def _format_changes(changes, orchestration=False):
+    '''
+    Format the changes dict based on what the data is
+    '''
     if not changes:
         return False, u''
+
+    if orchestration:
+        return True, _nested_changes(changes)
 
     if not isinstance(changes, dict):
         return True, u'Invalid Changes data: {0}'.format(changes)
@@ -438,18 +522,7 @@ def _format_changes(changes):
             changed = changed or c
     else:
         changed = True
-        opts = __opts__.copy()
-        # Pass the __opts__ dict. The loader will splat this modules __opts__ dict
-        # anyway so have to restore it after the other outputter is done
-        if __opts__['color']:
-            __opts__['color'] = u'CYAN'
-        __opts__['nested_indent'] = 14
-        ctext = u'\n'
-        ctext += salt.output.out_format(
-                changes,
-                'nested',
-                __opts__)
-        __opts__ = opts
+        ctext = _nested_changes(changes)
     return changed, ctext
 
 
@@ -471,8 +544,8 @@ def _format_terse(tcolor, comps, ret, colors, tabular):
                 c=colors, w='\n'.join(ret['warnings'])
             )
         fmt_string += u'{0}'
-        if __opts__.get('state_output_profile', False):
-            fmt_string += u'{6[start_time]!s} [{6[duration]!s} ms] '
+        if __opts__.get('state_output_profile', True) and 'start_time' in ret:
+            fmt_string += u'{6[start_time]!s} [{6[duration]!s:>7} ms] '
         fmt_string += u'{2:>10}.{3:<10} {4:7}   Name: {1}{5}'
     elif isinstance(tabular, str):
         fmt_string = tabular
@@ -483,7 +556,7 @@ def _format_terse(tcolor, comps, ret, colors, tabular):
                 c=colors, w='\n'.join(ret['warnings'])
             )
         fmt_string += u' {0} Name: {1} - Function: {2}.{3} - Result: {4}'
-        if __opts__.get('state_output_profile', False):
+        if __opts__.get('state_output_profile', True) and 'start_time' in ret:
             fmt_string += u' Started: - {6[start_time]!s} Duration: {6[duration]!s} ms'
         fmt_string += u'{5}'
 

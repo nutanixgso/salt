@@ -55,7 +55,8 @@ SCHEDULE_CONF = [
         'until',
         'after',
         'return_config',
-        'return_kwargs'
+        'return_kwargs',
+        'run_on_start'
 ]
 
 
@@ -133,7 +134,7 @@ def list_(show_all=False,
             # original item didn't include it.
             if schedule[job]['_seconds'] > 0:
                 schedule[job]['seconds'] = schedule[job]['_seconds']
-            else:
+            elif 'seconds' in schedule[job]:
                 del schedule[job]['seconds']
 
             # remove _seconds from the listing
@@ -214,7 +215,7 @@ def purge(**kwargs):
                         else:
                             ret['comment'].append('Failed to delete job {0} from schedule.'.format(name))
                             ret['result'] = True
-                        return ret
+
             except KeyError:
                 # Effectively a no-op, since we can't really return without an event system
                 ret['comment'] = 'Event module not available. Schedule add failed.'
@@ -358,15 +359,11 @@ def build_schedule_item(name, **kwargs):
         else:
             schedule[name]['splay'] = kwargs['splay']
 
-    for item in ['range', 'when', 'once', 'once_fmt', 'cron', 'returner',
-                 'return_config', 'return_kwargs', 'until', 'enabled']:
+    for item in ['range', 'when', 'once', 'once_fmt', 'cron',
+                 'returner', 'after', 'return_config', 'return_kwargs',
+                 'until', 'run_on_start']:
         if item in kwargs:
             schedule[name][item] = kwargs[item]
-
-    # if enabled is not included in the job,
-    # assume job is enabled.
-    if 'enabled' not in kwargs:
-        schedule[name]['enabled'] = True
 
     return schedule[name]
 

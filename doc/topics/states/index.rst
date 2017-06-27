@@ -18,35 +18,52 @@ resources to learn more about state and renderers.
         Contains: list of install packages, create users, transfer files, start
         services, and so on.
 
-    :doc:`Pillar System <../pillar/index>`
+    :ref:`Pillar System <pillar>`
         Contains: description of Salt's Pillar system.
 
-    :doc:`Highstate data structure <../../ref/states/highstate>`
+    :ref:`Highstate data structure <states-highstate>`
         Contains: a dry vocabulary and technical representation of the
         configuration format that states represent.
 
-    :doc:`Writing states <../../ref/states/writing>`
+    :ref:`Writing states <state-modules>`
         Contains: a guide on how to write Salt state modules, easily extending
         Salt to directly manage more software.
 
 .. note::
 
     Salt execution modules are different from state modules and cannot be
-    called directly within state files.  You must use the :mod:`module <salt.states.module>`
-    state module to call execution modules within state runs.
+    called as a state in an SLS file. In other words, this will not work:
+
+    .. code-block:: yaml
+
+        moe:
+          user.rename:
+            - new_name: larry
+            - onlyif: id moe
+
+    You must use the :mod:`module <salt.states.module>` states to call
+    execution modules directly. Here's an example:
+
+    .. code-block:: yaml
+
+       rename_moe:
+         module.run:
+           - m_name: moe
+           - new_name: larry
+           - onlyif: id moe
 
 **Renderers**
     Renderers use state configuration files written in a variety of languages,
     templating engines, or files. Salt's configuration management system is,
     under the hood, language agnostic.
 
-    :doc:`Full list of renderers <../../ref/renderers/all/index>`
+    :ref:`Full list of renderers <all-salt.renderers>`
         Contains: a list of renderers.
         YAML is one choice, but many systems are available, from
         alternative templating engines to the PyDSL language for rendering
         sls formulas.
 
-    :doc:`Renderers <../../ref/renderers/index>`
+    :ref:`Renderers <renderers>`
         Contains: more information about renderers. Salt states are only
         concerned with the ultimate highstate data structure, not how the
         data structure was created.

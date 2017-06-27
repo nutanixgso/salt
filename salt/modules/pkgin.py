@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 '''
 Package support for pkgin based systems, inspired from freebsdpkg module
+
+.. important::
+    If you feel that Salt should be using this module to manage packages on a
+    minion, and it is using a different module (or gives an error similar to
+    *'pkg.install' is not available*), see :ref:`here
+    <module-provider-override>`.
 '''
 
 # Import python libs
@@ -12,6 +18,7 @@ import re
 
 # Import salt libs
 import salt.utils
+import salt.utils.pkg
 import salt.utils.decorators as decorators
 from salt.exceptions import CommandExecutionError, MinionError
 
@@ -215,7 +222,8 @@ def refresh_db():
 
         salt '*' pkg.refresh_db
     '''
-
+    # Remove rtag file to keep multiple refreshes from happening in pkg states
+    salt.utils.pkg.clear_rtag(__opts__)
     pkgin = _check_pkgin()
 
     if pkgin:
@@ -404,10 +412,13 @@ def upgrade():
     '''
     Run pkg upgrade, if pkgin used. Otherwise do nothing
 
-    Return a dict containing the new package names and versions::
+    Returns a dictionary containing the changes:
 
-        {'<package>': {'old': '<old-version>',
-                       'new': '<new-version>'}}
+    .. code-block:: python
+
+        {'<package>':  {'old': '<old-version>',
+                        'new': '<new-version>'}}
+
 
     CLI Example:
 
@@ -415,11 +426,6 @@ def upgrade():
 
         salt '*' pkg.upgrade
     '''
-    ret = {'changes': {},
-           'result': True,
-           'comment': '',
-           }
-
     pkgin = _check_pkgin()
     if not pkgin:
         # There is not easy way to upgrade packages with old package system
@@ -428,23 +434,18 @@ def upgrade():
     old = list_pkgs()
 
     cmd = [pkgin, '-y', 'fug']
-    call = __salt__['cmd.run_all'](cmd,
-                                   output_loglevel='trace',
-                                   python_shell=False,
-                                   redirect_stderr=True)
-
-    if call['retcode'] != 0:
-        ret['result'] = False
-        if call['stdout']:
-            ret['comment'] = call['stdout']
-
+    result = __salt__['cmd.run_all'](cmd,
+                                     output_loglevel='trace',
+                                     python_shell=False)
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    ret['changes'] = salt.utils.compare_dicts(old, new)
+    ret = salt.utils.compare_dicts(old, new)
 
-    for field in ret.keys():
-        if not ret[field] or ret[field] == '':
-            del ret[field]
+    if result['retcode'] != 0:
+        raise CommandExecutionError(
+            'Problem encountered upgrading packages',
+            info={'changes': ret, 'result': result}
+        )
 
     return ret
 
@@ -620,7 +621,7 @@ def file_dict(*packages):
                 continue  # unexpected string
 
     ret = {'errors': errors, 'files': files}
-    for field in ret.keys():
+    for field in ret:
         if not ret[field] or ret[field] == '':
             del ret[field]
     return ret

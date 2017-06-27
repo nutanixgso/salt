@@ -52,8 +52,8 @@ def load():
 
     try:
         datastore_path = os.path.join(__opts__['cachedir'], 'datastore')
-        fn_ = salt.utils.fopen(datastore_path, 'rb')
-        return serial.load(fn_)
+        with salt.utils.fopen(datastore_path, 'rb') as rfh:
+            return serial.loads(rfh.read())
     except (IOError, OSError, NameError):
         return {}
 

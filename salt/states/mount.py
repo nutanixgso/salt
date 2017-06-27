@@ -39,6 +39,15 @@ import salt.ext.six as six
 log = logging.getLogger(__name__)
 
 
+def _size_convert(_re_size):
+    converted_size = int(_re_size.group('size_value'))
+    if _re_size.group('size_unit') == 'm':
+        converted_size = int(converted_size) * 1024
+    if _re_size.group('size_unit') == 'g':
+        converted_size = int(converted_size) * 1024 * 1024
+    return converted_size
+
+
 def mounted(name,
             device,
             fstype,
@@ -51,6 +60,7 @@ def mounted(name,
             mount=True,
             user=None,
             match_on='auto',
+            device_name_regex=None,
             extra_mount_invisible_options=None,
             extra_mount_invisible_keys=None,
             extra_mount_ignore_fs_keys=None,
@@ -68,7 +78,7 @@ def mounted(name,
 
     fstype
         The filesystem type, this will be ``xfs``, ``ext2/3/4`` in the case of classic
-        filesystems, and ``fuse`` in the case of fuse mounts
+        filesystems, ``fuse`` in the case of fuse mounts, and ``nfs`` in the case of nfs mounts
 
     mkmnt
         If the mount point is not present then the state will fail, set ``mkmnt: True``
@@ -93,7 +103,7 @@ def mounted(name,
         Set if the mount should be mounted immediately, Default is ``True``
 
     user
-        The user to own the mount; this defaults to the user salt is
+        The account used to execute the mount; this defaults to the user salt is
         running as on the minion
 
     match_on
@@ -102,29 +112,64 @@ def mounted(name,
         In general, ``auto`` matches on name for recognized special devices and
         device otherwise.
 
+    device_name_regex
+        A list of device exact names or regular expressions which should
+        not force a remount. For example, glusterfs may be mounted with a
+        comma-separated list of servers in fstab, but the /proc/self/mountinfo
+        will show only the first available server.
+
+        .. code-block:: jinja
+
+            {% set glusterfs_ip_list = ['10.0.0.1', '10.0.0.2', '10.0.0.3'] %}
+
+            mount glusterfs volume:
+              mount.mounted:
+                - name: /mnt/glusterfs_mount_point
+                - device: {{ glusterfs_ip_list|join(',') }}:/volume_name
+                - fstype: glusterfs
+                - opts: _netdev,rw,defaults,direct-io-mode=disable
+                - mkmnt: True
+                - persist: True
+                - dump: 0
+                - pass_num: 0
+                - device_name_regex:
+                  - ({{ glusterfs_ip_list|join('|') }}):/volume_name
+
+        .. versionadded:: 2016.11.0
+
     extra_mount_invisible_options
-        A list of extra options that are not visible through the /proc/self/mountinfo
-        interface. If a option is not visible through this interface it will always
-        remount the device. This Option extends the builtin mount_invisible_options list.
+        A list of extra options that are not visible through the
+        ``/proc/self/mountinfo`` interface.
+
+        If a option is not visible through this interface it will always remount
+        the device. This option extends the builtin ``mount_invisible_options``
+        list.
 
     extra_mount_invisible_keys
-        A list of extra key options that are not visible through the /proc/self/mountinfo
-        interface. If a key option is not visible through this interface it will always
-        remount the device. This Option extends the builtin mount_invisible_keys list.
-        A good example for a key Option is the password Option:
+        A list of extra key options that are not visible through the
+        ``/proc/self/mountinfo`` interface.
+
+        If a key option is not visible through this interface it will always
+        remount the device. This option extends the builtin
+        ``mount_invisible_keys`` list.
+
+        A good example for a key option is the password option::
+
             password=badsecret
 
-    extra_ignore_fs_keys
+    extra_mount_ignore_fs_keys
         A dict of filesystem options which should not force a remount. This will update
-        the internal dictionary. The dict should look like this:
+        the internal dictionary. The dict should look like this::
+
             {
                 'ramfs': ['size']
             }
 
     extra_mount_translate_options
         A dict of mount options that gets translated when mounted. To prevent a remount
-        add additional Options to the default dictionary. This will update the internal
-        dictionary. The dictionary should look like this:
+        add additional options to the default dictionary. This will update the internal
+        dictionary. The dictionary should look like this::
+
             {
                 'tcp': 'proto=tcp',
                 'udp': 'proto=udp'
@@ -140,6 +185,9 @@ def mounted(name,
            'changes': {},
            'result': True,
            'comment': ''}
+
+    if device_name_regex is None:
+        device_name_regex = []
 
     # Defaults is not a valid option on Mac OS
     if __grains__['os'] in ['MacOS', 'Darwin'] and opts == 'defaults':
@@ -316,20 +364,19 @@ def mounted(name,
 
                     size_match = re.match(r'size=(?P<size_value>[0-9]+)(?P<size_unit>k|m|g)', opt)
                     if size_match:
-                        converted_size = int(size_match.group('size_value'))
-                        if size_match.group('size_unit') == 'm':
-                            converted_size = int(size_match.group('size_value')) * 1024
-                        if size_match.group('size_unit') == 'g':
-                            converted_size = int(size_match.group('size_value')) * 1024 * 1024
+                        converted_size = _size_convert(size_match)
                         opt = "size={0}k".format(converted_size)
                     # make cifs option user synonym for option username which is reported by /proc/mounts
                     if fstype in ['cifs'] and opt.split('=')[0] == 'user':
                         opt = "username={0}".format(opt.split('=')[1])
 
+                    if opt.split('=')[0] in mount_ignore_fs_keys.get(fstype, []):
+                        opt = opt.split('=')[0]
+
                     # convert uid/gid to numeric value from user/group name
                     name_id_opts = {'uid': 'user.info',
                                     'gid': 'group.info'}
-                    if opt.split('=')[0] in name_id_opts:
+                    if opt.split('=')[0] in name_id_opts and len(opt.split('=')) > 1:
                         _givenid = opt.split('=')[1]
                         _param = opt.split('=')[0]
                         _id = _givenid
@@ -339,8 +386,18 @@ def mounted(name,
                                 _id = _info[_param]
                         opt = _param + '=' + str(_id)
 
+                    _active_superopts = active[real_name].get('superopts', [])
+                    for _active_opt in _active_superopts:
+                        size_match = re.match(r'size=(?P<size_value>[0-9]+)(?P<size_unit>k|m|g)', _active_opt)
+                        if size_match:
+                            converted_size = _size_convert(size_match)
+                            opt = "size={0}k".format(converted_size)
+                            _active_superopts.remove(_active_opt)
+                            _active_opt = "size={0}k".format(converted_size)
+                            _active_superopts.append(_active_opt)
+
                     if opt not in active[real_name]['opts'] \
-                    and opt not in active[real_name].get('superopts', []) \
+                    and opt not in _active_superopts \
                     and opt not in mount_invisible_options \
                     and opt not in mount_ignore_fs_keys.get(fstype, []) \
                     and opt not in mount_invisible_keys:
@@ -373,11 +430,22 @@ def mounted(name,
                                     opts.remove('remount')
             if real_device not in device_list:
                 # name matches but device doesn't - need to umount
+                _device_mismatch_is_ignored = None
+                for regex in list(device_name_regex):
+                    for _device in device_list:
+                        if re.match(regex, _device):
+                            _device_mismatch_is_ignored = _device
+                            break
                 if __opts__['test']:
                     ret['result'] = None
                     ret['comment'] = "An umount would have been forced " \
                                      + "because devices do not match.  Watched: " \
                                      + device
+                elif _device_mismatch_is_ignored:
+                    ret['result'] = True
+                    ret['comment'] = "An umount will not be forced " \
+                                     + "because device matched device_name_regex: " \
+                                     + _device_mismatch_is_ignored
                 else:
                     ret['changes']['umount'] = "Forced unmount because devices " \
                                                + "don't match. Wanted: " + device

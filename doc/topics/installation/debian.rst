@@ -4,7 +4,7 @@
 Debian GNU/Linux / Raspbian
 ===========================
 
-Debian GNU/Linux distribution and some devariatives such as Raspbian already
+Debian GNU/Linux distribution and some derivatives such as Raspbian already
 have included Salt packages to their repositories. However, current stable
 release codenamed "Jessie" contains old outdated Salt release. It is
 recommended to use SaltStack repository for Debian as described
@@ -15,130 +15,18 @@ Installation from official Debian and Raspbian repositories is described
 
 .. _installation-debian-repo:
 
-Installation from the SaltStack Repository
-==========================================
+Installation from the Official SaltStack Repository
+===================================================
 
-2015.5 and later packages for Debian 8 ("Jessie") are available in the
-SaltStack repository.
+Packages for Debian 8 (Jessie) and Debian 7 (Wheezy) are available in the
+Official SaltStack repository.
 
-.. note::
-    SaltStack repository contains only packages suitable for ``i386`` (32-bit
-    Intel-compatible CPUs) and ``amd64`` (64-bit) architectures. While Salt
-    packages are built for all Debian ports (have ``all`` suffix in package
-    names), some of the dependencies are avaivable only for ``amd64`` systems.
-
-.. important::
-    The repository folder structure changed in the 2015.8.3 release, though the
-    previous repository structure that was documented in 2015.8.1 can continue to
-    be used.
-
-To install using the SaltStack repository:
-
-#. Run the following command to import the SaltStack repository key:
-
-   .. code-block:: bash
-
-       wget -O - https://repo.saltstack.com/apt/debian/8/amd64/latest/SALTSTACK-GPG-KEY.pub | sudo apt-key add -
-
-#. Add the following line to ``/etc/apt/sources.list``:
-
-   .. code-block:: bash
-
-       deb http://repo.saltstack.com/apt/debian/8/amd64/latest jessie main
-
-#. Run ``sudo apt-get update``.
-
-#. Now go to the :ref:`packages installation <debian-install-pkgs>` section.
-
-Installation from the Community Repository
-==========================================
-
-The SaltStack community maintains a Debian repository at debian.saltstack.com.
-Packages for Debian Old Stable, Stable, and Unstable (Wheezy, Jessie, and Sid)
-for Salt 0.16 and later are published in this repository.
+Instructions are at https://repo.saltstack.com/#debian.
 
 .. note::
-   Packages in this repository are community built, and it can
-   take a little while until the latest SaltStack release is available
-   in this repository.
-
-Jessie (Stable)
----------------
-
-For Jessie, the following line is needed in either
-``/etc/apt/sources.list`` or a file in ``/etc/apt/sources.list.d``:
-
-.. code-block:: bash
-
-    deb http://debian.saltstack.com/debian jessie-saltstack main
-
-Wheezy (Old Stable)
--------------------
-
-For Wheezy, the following line is needed in either
-``/etc/apt/sources.list`` or a file in ``/etc/apt/sources.list.d``:
-
-.. code-block:: bash
-
-    deb http://debian.saltstack.com/debian wheezy-saltstack main
-
-Squeeze (Old Old Stable)
-------------------------
-
-For Squeeze, you will need to enable the Debian backports repository
-as well as the debian.saltstack.com repository. To do so, add the
-following to ``/etc/apt/sources.list`` or a file in
-``/etc/apt/sources.list.d``:
-
-.. code-block:: bash
-
-    deb http://debian.saltstack.com/debian squeeze-saltstack main
-    deb http://backports.debian.org/debian-backports squeeze-backports main
-
-Stretch (Testing)
------------------
-
-For Stretch, the following line is needed in either
-``/etc/apt/sources.list`` or a file in ``/etc/apt/sources.list.d``:
-
-.. code-block:: bash
-
-    deb http://debian.saltstack.com/debian stretch-saltstack main
-
-Sid (Unstable)
---------------
-
-For Sid, the following line is needed in either
-``/etc/apt/sources.list`` or a file in ``/etc/apt/sources.list.d``:
-
-.. code-block:: bash
-
-    deb http://debian.saltstack.com/debian unstable main
-
-Import the repository key
--------------------------
-
-You will need to import the key used for signing.
-
-.. code-block:: bash
-
-    wget -q -O- "http://debian.saltstack.com/debian-salt-team-joehealy.gpg.key" | apt-key add -
-
-.. note::
-
-    You can optionally verify the key integrity with ``sha512sum`` using the
-    public key signature shown here. E.g:
-
-    .. code-block:: bash
-
-        echo "b702969447140d5553e31e9701be13ca11cc0a7ed5fe2b30acb8491567560ee62f834772b5095d735dfcecb2384a5c1a20045f52861c417f50b68dd5ff4660e6  debian-salt-team-joehealy.gpg.key" | sha512sum -c
-
-Update the package database
----------------------------
-
-.. code-block:: bash
-
-    apt-get update
+    Regular security support for Debian 7 ended on April 25th 2016. As a result,
+    2016.3.1 and 2015.8.10 will be the last Salt releases for which Debian
+    7 packages are created.
 
 .. _installation-debian-raspbian:
 
@@ -182,7 +70,7 @@ To install fresh release of Salt minion on Jessie:
    .. code-block:: bash
 
        apt-get update
-       apt-get install python-zmq python-tornado/jessie-backports salt-common/stretch
+       apt-get install python-zmq python-systemd/jessie-backports python-tornado/jessie-backports salt-common/stretch
 
    **Raspbian**:
 
@@ -218,4 +106,4 @@ more than one package name may be given at a time:
 Post-installation tasks
 =======================
 
-Now, go to the :doc:`Configuring Salt </ref/configuration/index>` page.
+Now, go to the :ref:`Configuring Salt <configuring-salt>` page.

@@ -22,6 +22,7 @@ import salt.payload
 import salt.transport
 import salt.utils.args
 import salt.utils.jid
+import salt.utils.minion
 import salt.defaults.exitcodes
 from salt.log import LOG_LEVELS
 from salt.utils import is_windows
@@ -74,7 +75,7 @@ class Caller(object):
             ttype = opts['pillar']['master']['transport']
 
         # switch on available ttypes
-        if ttype in ('zeromq', 'tcp'):
+        if ttype in ('zeromq', 'tcp', 'detect'):
             return ZeroMQCaller(opts, **kwargs)
         elif ttype == 'raet':
             return RAETCaller(opts, **kwargs)
@@ -137,7 +138,7 @@ class BaseCaller(object):
                                                         '/tmp/stats'),
                                stop=True)
             out = ret.get('out', 'nested')
-            if self.opts['metadata']:
+            if self.opts['print_metadata']:
                 print_ret = ret
                 out = 'nested'
             else:
@@ -170,15 +171,22 @@ class BaseCaller(object):
             else:
                 sys.stderr.write('\n')
             sys.exit(-1)
+        metadata = self.opts.get('metadata')
+        if metadata is not None:
+            metadata = salt.utils.args.yamlify_arg(metadata)
         try:
             sdata = {
                 'fun': fun,
                 'pid': os.getpid(),
                 'jid': ret['jid'],
                 'tgt': 'salt-call'}
+            if metadata is not None:
+                sdata['metadata'] = metadata
             args, kwargs = salt.minion.load_args_and_kwargs(
                 self.minion.functions[fun],
-                salt.utils.args.parse_input(self.opts['arg']),
+                salt.utils.args.parse_input(
+                    self.opts['arg'],
+                    no_parse=self.opts.get('no_parse', [])),
                 data=sdata)
             try:
                 with salt.utils.fopen(proc_fn, 'w+b') as fp_:
@@ -229,12 +237,15 @@ class BaseCaller(object):
             if isinstance(oput, six.string_types):
                 ret['out'] = oput
         is_local = self.opts['local'] or self.opts.get(
-            'file_client', False) == 'local'
+            'file_client', False) == 'local' or self.opts.get(
+            'master_type') == 'disable'
         returners = self.opts.get('return', '').split(',')
         if (not is_local) or returners:
             ret['id'] = self.opts['id']
             ret['fun'] = fun
             ret['fun_args'] = self.opts['arg']
+            if metadata is not None:
+                ret['metadata'] = metadata
 
         for returner in returners:
             if not returner:  # if we got an empty returner somehow, skip
@@ -246,7 +257,6 @@ class BaseCaller(object):
                 pass
 
         # return the job infos back up to the respective minion's master
-
         if not is_local:
             try:
                 mret = ret.copy()
@@ -254,6 +264,10 @@ class BaseCaller(object):
                 self.return_pub(mret)
             except Exception:
                 pass
+        elif self.opts['cache_jobs']:
+            # Local job cache has been enabled
+            salt.utils.minion.cache_jobs(self.opts, ret['jid'], ret)
+
         # close raet channel here
         return ret
 
@@ -344,7 +358,7 @@ class RAETCaller(BaseCaller):
                 self.stack.server.close()
                 salt.transport.jobber_stack = None
 
-            if self.opts['metadata']:
+            if self.opts['print_metadata']:
                 print_ret = ret
             else:
                 print_ret = ret.get('return', {})

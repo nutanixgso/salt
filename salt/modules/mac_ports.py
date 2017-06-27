@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 '''
-Support for MacPorts under Mac OSX.
+Support for MacPorts under macOS.
 
 This module has some caveats.
 
@@ -38,9 +38,9 @@ import re
 
 # Import salt libs
 import salt.utils
-from salt.exceptions import (
-    CommandExecutionError
-)
+import salt.utils.pkg
+import salt.utils.mac_utils
+from salt.exceptions import CommandExecutionError
 
 # Import 3rd-party libs
 import salt.ext.six as six
@@ -55,33 +55,20 @@ def __virtual__():
     '''
     Confine this module to Mac OS with MacPorts.
     '''
+    if not salt.utils.is_darwin():
+        return False, 'mac_ports only available on MacOS'
 
-    if salt.utils.which('port') and __grains__['os'] == 'MacOS':
-        return __virtualname__
-    return (
-        False,
-        'The macports execution module cannot be loaded: only available on '
-        'MacOS with the \'port\' binary in the PATH.'
-    )
+    if not salt.utils.which('port'):
+        return False, 'mac_ports requires the "port" binary'
+
+    return __virtualname__
 
 
 def _list(query=''):
-    ret = {}
     cmd = 'port list {0}'.format(query)
-    call = __salt__['cmd.run_all'](cmd, output_loglevel='trace')
+    out = salt.utils.mac_utils.execute_return_result(cmd)
 
-    if call['retcode'] != 0:
-        comment = ''
-        if 'stderr' in call:
-            comment += call['stderr']
-        if 'stdout' in call:
-            comment += call['stdout']
-        raise CommandExecutionError(
-            '{0}'.format(comment)
-        )
-    else:
-        out = call['stdout']
-
+    ret = {}
     for line in out.splitlines():
         try:
             name, version_num, category = re.split(r'\s+', line.lstrip())[0:3]
@@ -121,7 +108,7 @@ def list_pkgs(versions_as_list=False, **kwargs):
 
     ret = {}
     cmd = ['port', 'installed']
-    out = __salt__['cmd.run'](cmd, output_loglevel='trace', python_shell=False)
+    out = salt.utils.mac_utils.execute_return_result(cmd)
     for line in out.splitlines():
         try:
             name, version_num, active = re.split(r'\s+', line.lstrip())[0:3]
@@ -184,11 +171,7 @@ def latest_version(*names, **kwargs):
         if key not in installed or salt.utils.compare_versions(ver1=installed[key], oper='<', ver2=val):
             ret[key] = val
         else:
-            ret[key] = ''
-
-    # Return a string if only one package name passed
-    if len(names) == 1:
-        return ret[names[0]]
+            ret[key] = '{0} (installed)'.format(version(key))
 
     return ret
 
@@ -230,28 +213,24 @@ def remove(name=None, pkgs=None, **kwargs):
     targets = [x for x in pkg_params if x in old]
     if not targets:
         return {}
+
     cmd = ['port', 'uninstall']
     cmd.extend(targets)
 
-    out = __salt__['cmd.run_all'](
-        cmd,
-        output_loglevel='trace',
-        python_shell=False
-    )
-    if out['retcode'] != 0 and out['stderr']:
-        errors = [out['stderr']]
-    else:
-        errors = []
+    err_message = ''
+    try:
+        salt.utils.mac_utils.execute_return_success(cmd)
+    except CommandExecutionError as exc:
+        err_message = exc.strerror
 
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
     ret = salt.utils.compare_dicts(old, new)
 
-    if errors:
+    if err_message:
         raise CommandExecutionError(
             'Problem encountered removing package(s)',
-            info={'errors': errors, 'changes': ret}
-        )
+            info={'errors': err_message, 'changes': ret})
 
     return ret
 
@@ -348,30 +327,25 @@ def install(name=None, refresh=False, pkgs=None, **kwargs):
     cmd = ['port', 'install']
     cmd.extend(formulas_array)
 
-    out = __salt__['cmd.run_all'](
-        cmd,
-        output_loglevel='trace',
-        python_shell=False
-    )
-    if out['retcode'] != 0 and out['stderr']:
-        errors = [out['stderr']]
-    else:
-        errors = []
+    err_message = ''
+    try:
+        salt.utils.mac_utils.execute_return_success(cmd)
+    except CommandExecutionError as exc:
+        err_message = exc.strerror
 
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
     ret = salt.utils.compare_dicts(old, new)
 
-    if errors:
+    if err_message:
         raise CommandExecutionError(
             'Problem encountered installing package(s)',
-            info={'errors': errors, 'changes': ret}
-        )
+            info={'errors': err_message, 'changes': ret})
 
     return ret
 
 
-def list_upgrades(refresh=True):
+def list_upgrades(refresh=True, **kwargs):  # pylint: disable=W0613
     '''
     Check whether or not an upgrade is available for all packages
 
@@ -408,16 +382,17 @@ def upgrade_available(pkg, refresh=True):
 def refresh_db():
     '''
     Update ports with ``port selfupdate``
-    '''
-    call = __salt__['cmd.run_all']('port selfupdate', output_loglevel='trace')
-    if call['retcode'] != 0:
-        comment = ''
-        if 'stderr' in call:
-            comment += call['stderr']
 
-        raise CommandExecutionError(
-            '{0}'.format(comment)
-        )
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt mac pkg.refresh_db
+    '''
+    # Remove rtag file to keep multiple refreshes from happening in pkg states
+    salt.utils.pkg.clear_rtag(__opts__)
+    cmd = ['port', 'selfupdate']
+    return salt.utils.mac_utils.execute_return_success(cmd)
 
 
 def upgrade(refresh=True):  # pylint: disable=W0613
@@ -429,10 +404,13 @@ def upgrade(refresh=True):  # pylint: disable=W0613
     refresh
         Update ports with ``port selfupdate``
 
-    Return a dict containing the new package names and versions::
+    Returns a dictionary containing the changes:
 
-        {'<package>': {'old': '<old-version>',
-                       'new': '<new-version>'}}
+    .. code-block:: python
+
+        {'<package>':  {'old': '<old-version>',
+                        'new': '<new-version>'}}
+
 
     CLI Example:
 
@@ -440,29 +418,22 @@ def upgrade(refresh=True):  # pylint: disable=W0613
 
         salt '*' pkg.upgrade
     '''
-    ret = {'changes': {},
-           'result': True,
-           'comment': '',
-           }
-
     if refresh:
         refresh_db()
 
     old = list_pkgs()
     cmd = ['port', 'upgrade', 'outdated']
-
-    call = __salt__['cmd.run_all'](cmd,
-                                   output_loglevel='trace',
-                                   python_shell=False,
-                                   redirect_stderr=True)
-
-    if call['retcode'] != 0:
-        ret['result'] = False
-        if call['stdout']:
-            ret['comment'] = call['stdout']
-
+    result = __salt__['cmd.run_all'](cmd,
+                                     output_loglevel='trace',
+                                     python_shell=False)
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    ret['changes'] = salt.utils.compare_dicts(old, new)
+    ret = salt.utils.compare_dicts(old, new)
+
+    if result['retcode'] != 0:
+        raise CommandExecutionError(
+            'Problem encountered upgrading packages',
+            info={'changes': ret, 'result': result}
+        )
 
     return ret

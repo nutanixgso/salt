@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 '''
 Pkgutil support for Solaris
+
+.. important::
+    If you feel that Salt should be using this module to manage packages on a
+    minion, and it is using a different module (or gives an error similar to
+    *'pkg.install' is not available*), see :ref:`here
+    <module-provider-override>`.
 '''
 from __future__ import absolute_import
 
@@ -9,6 +15,7 @@ import copy
 
 # Import salt libs
 import salt.utils
+import salt.utils.pkg
 from salt.exceptions import CommandExecutionError, MinionError
 import salt.ext.six as six
 
@@ -36,6 +43,8 @@ def refresh_db():
 
         salt '*' pkgutil.refresh_db
     '''
+    # Remove rtag file to keep multiple refreshes from happening in pkg states
+    salt.utils.pkg.clear_rtag(__opts__)
     return __salt__['cmd.retcode']('/opt/csw/bin/pkgutil -U') == 0
 
 
@@ -63,7 +72,7 @@ def upgrade_available(name):
     return ''
 
 
-def list_upgrades(refresh=True):
+def list_upgrades(refresh=True, **kwargs):  # pylint: disable=W0613
     '''
     List all available package upgrades on this system
 

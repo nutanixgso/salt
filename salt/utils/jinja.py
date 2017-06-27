@@ -5,9 +5,13 @@ Jinja loading utils to enable a more powerful backend for jinja templates
 
 # Import python libs
 from __future__ import absolute_import
+import collections
+import uuid
+import pipes
 import json
 import pprint
 import logging
+import re
 from os import path
 from functools import wraps
 
@@ -34,9 +38,12 @@ __all__ = [
     'SerializerExtension'
 ]
 
+GLOBAL_UUID = uuid.UUID('91633EBF-1C86-5E33-935A-28061F4B480E')
 
 # To dump OrderedDict objects as regular dicts. Used by the yaml
 # template filter.
+
+
 class OrderedDictDumper(yaml.Dumper):  # pylint: disable=W0232
     pass
 
@@ -60,10 +67,13 @@ class SaltCacheLoader(BaseLoader):
         self.saltenv = saltenv
         self.encoding = encoding
         if self.opts['file_roots'] is self.opts['pillar_roots']:
-            self.searchpath = opts['file_roots'][saltenv]
+            if saltenv not in self.opts['file_roots']:
+                self.searchpath = []
+            else:
+                self.searchpath = opts['file_roots'][saltenv]
         else:
             self.searchpath = [path.join(opts['cachedir'], 'files', saltenv)]
-        log.debug('Jinja search path: \'{0}\''.format(self.searchpath))
+        log.debug('Jinja search path: %s', self.searchpath)
         self._file_client = None
         self.cached = []
         self.pillar_rend = pillar_rend
@@ -154,10 +164,10 @@ class PrintableDict(OrderedDict):
         for key, value in six.iteritems(self):
             if isinstance(value, six.string_types):
                 # keeps quotes around strings
-                output.append('\'{0}\': \'{1}\''.format(key, value))
+                output.append('{0!r}: {1!r}'.format(key, value))  # pylint: disable=repr-flag-used-in-string
             else:
                 # let default output
-                output.append('\'{0}\': {1!s}'.format(key, value))
+                output.append('{0!r}: {1!s}'.format(key, value))  # pylint: disable=repr-flag-used-in-string
         return '{' + ', '.join(output) + '}'
 
     def __repr__(self):  # pylint: disable=W0221
@@ -165,7 +175,7 @@ class PrintableDict(OrderedDict):
         for key, value in six.iteritems(self):
             # Raw string formatter required here because this is a repr
             # function.
-            output.append('\'{0}\': {1!r}'.format(key, value))
+            output.append('{0!r}: {1!r}'.format(key, value))  # pylint: disable=repr-flag-used-in-string
         return '{' + ', '.join(output) + '}'
 
 
@@ -177,7 +187,7 @@ def ensure_sequence_filter(data):
 
         ensure that parsed data is a sequence
 
-    .. code-block:: yaml
+    .. code-block:: jinja
 
         {% set my_string = "foo" %}
         {% set my_list = ["bar", ] %}
@@ -199,6 +209,303 @@ def ensure_sequence_filter(data):
     if not isinstance(data, (list, tuple, set, dict)):
         return [data]
     return data
+
+
+def to_bool(val):
+    '''
+    Returns the logical value.
+
+    .. code-block:: jinja
+
+        {{ 'yes' | to_bool }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        True
+    '''
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (six.text_type, six.string_types)):
+        return val.lower() in ('yes', '1', 'true')
+    if isinstance(val, six.integer_types):
+        return val > 0
+    if not isinstance(val, collections.Hashable):
+        return len(val) > 0
+    return False
+
+
+def quote(txt):
+    '''
+    Wraps a text around quotes.
+
+    .. code-block:: jinja
+
+        {% set my_text = 'my_text' %}
+        {{ my_text | quote }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        'my_text'
+    '''
+    return pipes.quote(txt)
+
+
+def regex_search(txt, rgx, ignorecase=False, multiline=False):
+    '''
+    Searches for a pattern in the text.
+
+    .. code-block:: jinja
+
+        {% set my_text = 'abcd' %}
+        {{ my_text | regex_search('^(.*)BC(.*)$', ignorecase=True) }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        ('a', 'd')
+    '''
+    flag = 0
+    if ignorecase:
+        flag |= re.I
+    if multiline:
+        flag |= re.M
+    obj = re.search(rgx, txt, flag)
+    if not obj:
+        return
+    return obj.groups()
+
+
+def regex_match(txt, rgx, ignorecase=False, multiline=False):
+    '''
+    Searches for a pattern in the text.
+
+    .. code-block:: jinja
+
+        {% set my_text = 'abcd' %}
+        {{ my_text | regex_match('^(.*)BC(.*)$', ignorecase=True) }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        ('a', 'd')
+    '''
+    flag = 0
+    if ignorecase:
+        flag |= re.I
+    if multiline:
+        flag |= re.M
+    obj = re.match(rgx, txt, flag)
+    if not obj:
+        return
+    return obj.groups()
+
+
+def regex_replace(txt, rgx, val, ignorecase=False, multiline=False):
+    r'''
+    Searches for a pattern and replaces with a sequence of characters.
+
+    .. code-block:: jinja
+
+        {% set my_text = 'lets replace spaces' %}
+        {{ my_text | regex_replace('\s+', '__') }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        lets__replace__spaces
+    '''
+    flag = 0
+    if ignorecase:
+        flag |= re.I
+    if multiline:
+        flag |= re.M
+    compiled_rgx = re.compile(rgx, flag)
+    return compiled_rgx.sub(val, txt)
+
+
+def uuid_(val):
+    '''
+    Returns a UUID corresponding to the value passed as argument.
+
+    .. code-block:: jinja
+
+        {{ 'example' | uuid }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        f4efeff8-c219-578a-bad7-3dc280612ec8
+    '''
+    return str(uuid.uuid5(GLOBAL_UUID, str(val)))
+
+
+### List-related filters
+
+
+def unique(lst):
+    '''
+    Removes duplicates from a list.
+
+    .. code-block:: jinja
+
+        {% set my_list = ['a', 'b', 'c', 'a', 'b'] -%}
+        {{ my_list | unique }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        ['a', 'b', 'c']
+    '''
+    if not isinstance(lst, collections.Hashable):
+        return list(set(lst))
+    return lst
+
+
+def lst_min(obj):
+    '''
+    Returns the min value.
+
+    .. code-block:: jinja
+
+        {% set my_list = [1,2,3,4] -%}
+        {{ my_list | min }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        1
+    '''
+    return min(obj)
+
+
+def lst_max(obj):
+    '''
+    Returns the max value.
+
+    .. code-block:: jinja
+
+        {% my_list = [1,2,3,4] -%}
+        {{ set my_list | max }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        4
+    '''
+    return max(obj)
+
+
+def lst_avg(lst):
+    '''
+    Returns the average value of a list.
+
+    .. code-block:: jinja
+
+        {% my_list = [1,2,3,4] -%}
+        {{ set my_list | avg }}
+
+    will be rendered as:
+
+    .. code-block:: yaml
+
+        2.5
+    '''
+    if not isinstance(lst, collections.Hashable):
+        return float(sum(lst)/len(lst))
+    return float(lst)
+
+
+def union(lst1, lst2):
+    '''
+    Returns the union of two lists.
+
+    .. code-block:: jinja
+
+        {% my_list = [1,2,3,4] -%}
+        {{ set my_list | union([2, 4, 6]) }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        [1, 2, 3, 4, 6]
+    '''
+    if isinstance(lst1, collections.Hashable) and isinstance(lst2, collections.Hashable):
+        return set(lst1) | set(lst2)
+    return unique(lst1 + lst2)
+
+
+def intersect(lst1, lst2):
+    '''
+    Returns the intersection of two lists.
+
+    .. code-block:: jinja
+
+        {% my_list = [1,2,3,4] -%}
+        {{ set my_list | intersect([2, 4, 6]) }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        [2, 4]
+    '''
+    if isinstance(lst1, collections.Hashable) and isinstance(lst2, collections.Hashable):
+        return set(lst1) & set(lst2)
+    return unique([ele for ele in lst1 if ele in lst2])
+
+
+def difference(lst1, lst2):
+    '''
+    Returns the difference of two lists.
+
+    .. code-block:: jinja
+
+        {% my_list = [1,2,3,4] -%}
+        {{ set my_list | difference([2, 4, 6]) }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        [1, 3, 6]
+    '''
+    if isinstance(lst1, collections.Hashable) and isinstance(lst2, collections.Hashable):
+        return set(lst1) - set(lst2)
+    return unique([ele for ele in lst1 if ele not in lst2])
+
+
+def symmetric_difference(lst1, lst2):
+    '''
+    Returns the symmetric difference of two lists.
+
+    .. code-block:: jinja
+
+        {% my_list = [1,2,3,4] -%}
+        {{ set my_list | symmetric_difference([2, 4, 6]) }}
+
+    will be rendered as:
+
+    .. code-block:: text
+
+        [1, 3]
+    '''
+    if isinstance(lst1, collections.Hashable) and isinstance(lst2, collections.Hashable):
+        return set(lst1) ^ set(lst2)
+    return unique([ele for ele in union(lst1, lst2) if ele not in intersect(lst1, lst2)])
 
 
 @jinja2.contextfunction
@@ -272,7 +579,7 @@ class SerializerExtension(Extension, object):
 
     **Load tags**
 
-    Salt implements ``import_yaml`` and ``import_json`` tags. They work like
+    Salt implements ``load_yaml`` and ``load_json`` tags. They work like
     the `import tag`_, except that the document is also deserialized.
 
     Syntaxes are ``{% load_yaml as [VARIABLE] %}[YOUR DATA]{% endload %}``
@@ -330,22 +637,56 @@ class SerializerExtension(Extension, object):
         {% from "doc1.sls" import var1, var2 as local2 %}
         {{ var1.foo }} {{ local2.bar }}
 
+    ** Escape Filters **
+
+    .. versionadded:: 2017.7.0
+
+    Allows escaping of strings so they can be interpreted literally by another
+    function.
+
+    For example:
+
+    .. code-block:: jinja
+
+        escape_regex = {{ 'https://example.com?foo=bar%20baz' | escape_regex }}
+
+    will be rendered as::
+
+        escape_regex = https\\:\\/\\/example\\.com\\?foo\\=bar\\%20baz
+
+    ** Set Theory Filters **
+
+    .. versionadded:: 2017.7.0
+
+    Performs set math using Jinja filters.
+
+    For example:
+
+    .. code-block:: jinja
+
+        unique = {{ ['foo', 'foo', 'bar'] | unique }}
+
+    will be rendered as::
+
+        unique = ['foo', 'bar']
+
     .. _`import tag`: http://jinja.pocoo.org/docs/templates/#import
     '''
 
     tags = set(['load_yaml', 'load_json', 'import_yaml', 'import_json',
-                'load_text', 'import_text'])
+                'load_text', 'import_text', 'regex_escape', 'unique'])
 
     def __init__(self, environment):
         super(SerializerExtension, self).__init__(environment)
         self.environment.filters.update({
             'yaml': self.format_yaml,
-            'yaml_safe': self.format_yaml_safe,
             'json': self.format_json,
             'python': self.format_python,
             'load_yaml': self.load_yaml,
             'load_json': self.load_json,
             'load_text': self.load_text,
+            'regex_escape': self.regex_escape,
+            'unique': self.unique,
         })
 
         if self.environment.finalize is None:
@@ -378,15 +719,8 @@ class SerializerExtension(Extension, object):
     def format_yaml(self, value, flow_style=True):
         yaml_txt = yaml.dump(value, default_flow_style=flow_style,
                              Dumper=OrderedDictDumper).strip()
-        if yaml_txt.endswith('\n...\n'):
-            yaml_txt = yaml_txt[:len(yaml_txt-5)]
-        return Markup(yaml_txt)
-
-    def format_yaml_safe(self, value, flow_style=True):
-        yaml_txt = yaml.safe_dump(value, default_flow_style=flow_style,
-                                  Dumper=OrderedDictDumper).strip()
-        if yaml_txt.endswith('\n...\n'):
-            yaml_txt = yaml_txt[:len(yaml_txt-5)]
+        if yaml_txt.endswith('\n...'):
+            yaml_txt = yaml_txt[:len(yaml_txt)-4]
         return Markup(yaml_txt)
 
     def format_python(self, value):
@@ -533,3 +867,17 @@ class SerializerExtension(Extension, object):
             ).set_lineno(lineno)
         ]
     # pylint: enable=E1120,E1121
+
+    def regex_escape(self, value):
+        return re.escape(value)
+
+    def unique(self, values):
+        ret = None
+        if isinstance(values, collections.Hashable):
+            ret = set(values)
+        else:
+            ret = []
+            for value in values:
+                if value not in ret:
+                    ret.append(value)
+        return ret

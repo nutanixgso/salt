@@ -44,6 +44,10 @@ The information which can be stored in a roster ``target`` is the following:
         # Optional parameters
         port:        # The target system's ssh port number
         sudo:        # Boolean to run command via sudo
+        sudo_user:   # Str: Set this to execute Salt as a sudo user other than root.
+                     # This user must be in the same system group as the remote user
+                     # that is used to login and is specified above. Alternatively,
+                     # the user must be a super-user.
         tty:         # Boolean: Set this option to True if sudo is also set to
                      # True and requiretty is also set on the target system
         priv:        # File path to ssh private key, defaults to salt-ssh.rsa
@@ -56,6 +60,21 @@ The information which can be stored in a roster ``target`` is the following:
                      # components. Defaults to /tmp/salt-<hash>.
         cmd_umask:   # umask to enforce for the salt-call command. Should be in
                      # octal (so for 0o077 in YAML you would do 0077, or 63)
+
+Target Defaults
+---------------
+
+The `roster_defaults` dictionary in the master config is used to set the
+default login variables for minions in the roster so that the same arguments do
+not need to be passed with commandline arguments.
+
+.. code-block:: yaml
+
+    roster_defaults:
+        user: daniel
+        sudo: True
+        priv: /root/.ssh/id_rsa
+        tty: True
 
 thin_dir
 --------

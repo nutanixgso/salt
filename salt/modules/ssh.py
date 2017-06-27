@@ -9,9 +9,8 @@ Manage client ssh components
     or removed.
 '''
 
-from __future__ import absolute_import
-
 # Import python libs
+from __future__ import absolute_import
 import binascii
 import hashlib
 import logging
@@ -20,6 +19,7 @@ import re
 import subprocess
 
 # Import salt libs
+import salt.ext.six as six
 import salt.utils
 import salt.utils.files
 import salt.utils.decorators as decorators
@@ -27,10 +27,16 @@ from salt.exceptions import (
     SaltInvocationError,
     CommandExecutionError,
 )
+
+# Import 3rd-party libs
+import salt.ext.six as six
 from salt.ext.six.moves import range
 
 log = logging.getLogger(__name__)
 DEFAULT_SSH_PORT = 22
+
+if six.PY3:
+    import base64
 
 
 def __virtual__():
@@ -149,15 +155,8 @@ def _replace_auth_key(
                     # Commented Line
                     lines.append(line)
                     continue
-                comps = line.split()
-                if len(comps) < 2:
-                    # Not a valid line
-                    lines.append(line)
-                    continue
-                key_ind = 1
-                if comps[0][:4:] not in ['ssh-', 'ecds']:
-                    key_ind = 2
-                if comps[key_ind] == key:
+                comps = re.findall(r'((.*)\s)?(ssh-[a-z0-9-]+|ecdsa-[a-z0-9-]+)\s([a-zA-Z0-9+/]+={0,2})(\s(.*))?', line)
+                if len(comps) > 0 and len(comps[0]) > 3 and comps[0][3] == key:
                     lines.append(auth_line)
                 else:
                     lines.append(line)
@@ -172,7 +171,7 @@ def _replace_auth_key(
         )
 
 
-def _validate_keys(key_file):
+def _validate_keys(key_file, fingerprint_hash_type):
     '''
     Return a dict containing validated keys in the passed file
     '''
@@ -208,7 +207,7 @@ def _validate_keys(key_file):
                 enc = comps[0]
                 key = comps[1]
                 comment = ' '.join(comps[2:])
-                fingerprint = _fingerprint(key)
+                fingerprint = _fingerprint(key, fingerprint_hash_type)
                 if fingerprint is None:
                     continue
 
@@ -224,7 +223,7 @@ def _validate_keys(key_file):
     return ret
 
 
-def _fingerprint(public_key):
+def _fingerprint(public_key, fingerprint_hash_type):
     '''
     Return a public key fingerprint based on its base64-encoded representation
 
@@ -232,12 +231,42 @@ def _fingerprint(public_key):
     in the form "xx:xx:...:xx"
 
     If the key is invalid (incorrect base64 string), return None
+
+    public_key
+        The public key to return the fingerprint for
+
+    fingerprint_hash_type
+        The public key fingerprint hash type that the public key fingerprint
+        was originally hashed with. This defaults to ``sha256`` if not specified.
+
+        .. versionadded:: 2016.11.4
+        .. versionchanged:: 2017.7.0: default changed from ``md5`` to ``sha256``
+
     '''
+    if fingerprint_hash_type:
+        hash_type = fingerprint_hash_type.lower()
+    else:
+        hash_type = 'sha256'
+
     try:
-        raw_key = public_key.decode('base64')
+        hash_func = getattr(hashlib, hash_type)
+    except AttributeError:
+        raise CommandExecutionError(
+            'The fingerprint_hash_type {0} is not supported.'.format(
+                hash_type
+            )
+        )
+
+    try:
+        if six.PY2:
+            raw_key = public_key.decode('base64')
+        else:
+            raw_key = base64.b64decode(public_key, validate=True)  # pylint: disable=E1123
     except binascii.Error:
         return None
-    ret = hashlib.md5(raw_key).hexdigest()
+
+    ret = hash_func(raw_key).hexdigest()
+
     chunks = [ret[i:i + 2] for i in range(0, len(ret), 2)]
     return ':'.join(chunks)
 
@@ -318,7 +347,9 @@ def host_keys(keydir=None, private=True):
     return keys
 
 
-def auth_keys(user=None, config='.ssh/authorized_keys'):
+def auth_keys(user=None,
+              config='.ssh/authorized_keys',
+              fingerprint_hash_type=None):
     '''
     Return the authorized keys for users
 
@@ -348,7 +379,7 @@ def auth_keys(user=None, config='.ssh/authorized_keys'):
             pass
 
         if full and os.path.isfile(full):
-            keys[u] = _validate_keys(full)
+            keys[u] = _validate_keys(full, fingerprint_hash_type)
 
     if old_output_when_one_user:
         if user[0] in keys:
@@ -362,7 +393,8 @@ def auth_keys(user=None, config='.ssh/authorized_keys'):
 def check_key_file(user,
                    source,
                    config='.ssh/authorized_keys',
-                   saltenv='base'):
+                   saltenv='base',
+                   fingerprint_hash_type=None):
     '''
     Check a keyfile from a source destination against the local keys and
     return the keys to change
@@ -376,7 +408,7 @@ def check_key_file(user,
     keyfile = __salt__['cp.cache_file'](source, saltenv)
     if not keyfile:
         return {}
-    s_keys = _validate_keys(keyfile)
+    s_keys = _validate_keys(keyfile, fingerprint_hash_type)
     if not s_keys:
         err = 'No keys detected in {0}. Is file properly ' \
               'formatted?'.format(source)
@@ -392,12 +424,19 @@ def check_key_file(user,
                 s_keys[key]['enc'],
                 s_keys[key]['comment'],
                 s_keys[key]['options'],
-                config)
+                config=config,
+                fingerprint_hash_type=fingerprint_hash_type)
         return ret
 
 
-def check_key(user, key, enc, comment, options, config='.ssh/authorized_keys',
-              cache_keys=None):
+def check_key(user,
+              key,
+              enc,
+              comment,
+              options,
+              config='.ssh/authorized_keys',
+              cache_keys=None,
+              fingerprint_hash_type=None):
     '''
     Check to see if a key needs updating, returns "update", "add" or "exists"
 
@@ -410,7 +449,9 @@ def check_key(user, key, enc, comment, options, config='.ssh/authorized_keys',
     if cache_keys is None:
         cache_keys = []
     enc = _refine_enc(enc)
-    current = auth_keys(user, config)
+    current = auth_keys(user,
+                        config=config,
+                        fingerprint_hash_type=fingerprint_hash_type)
     nline = _format_auth_line(key, enc, comment, options)
 
     # Removing existing keys from the auth_keys isn't really a good idea
@@ -439,9 +480,10 @@ def check_key(user, key, enc, comment, options, config='.ssh/authorized_keys',
 
 
 def rm_auth_key_from_file(user,
-             source,
-             config='.ssh/authorized_keys',
-             saltenv='base'):
+                          source,
+                          config='.ssh/authorized_keys',
+                          saltenv='base',
+                          fingerprint_hash_type=None):
     '''
     Remove an authorized key from the specified user's authorized key file,
     using a file as source
@@ -458,7 +500,7 @@ def rm_auth_key_from_file(user,
             'Failed to pull key file from salt file server'
         )
 
-    s_keys = _validate_keys(lfile)
+    s_keys = _validate_keys(lfile, fingerprint_hash_type)
     if not s_keys:
         err = (
             'No keys detected in {0}. Is file properly formatted?'.format(
@@ -474,7 +516,8 @@ def rm_auth_key_from_file(user,
             rval += rm_auth_key(
                 user,
                 key,
-                config
+                config=config,
+                fingerprint_hash_type=fingerprint_hash_type
             )
         # Due to the ability for a single file to have multiple keys, it's
         # possible for a single call to this function to have both "replace"
@@ -488,7 +531,10 @@ def rm_auth_key_from_file(user,
             return 'Key not present'
 
 
-def rm_auth_key(user, key, config='.ssh/authorized_keys'):
+def rm_auth_key(user,
+                key,
+                config='.ssh/authorized_keys',
+                fingerprint_hash_type=None):
     '''
     Remove an authorized key from the specified user's authorized key file
 
@@ -498,7 +544,9 @@ def rm_auth_key(user, key, config='.ssh/authorized_keys'):
 
         salt '*' ssh.rm_auth_key <user> <key>
     '''
-    current = auth_keys(user, config)
+    current = auth_keys(user,
+                        config=config,
+                        fingerprint_hash_type=fingerprint_hash_type)
     linere = re.compile(r'^(.*?)\s?((?:ssh\-|ecds)[\w-]+\s.+)$')
     if key in current:
         # Remove the key
@@ -556,7 +604,8 @@ def rm_auth_key(user, key, config='.ssh/authorized_keys'):
 def set_auth_key_from_file(user,
                            source,
                            config='.ssh/authorized_keys',
-                           saltenv='base'):
+                           saltenv='base',
+                           fingerprint_hash_type=None):
     '''
     Add a key to the authorized_keys file, using a file as the source.
 
@@ -573,7 +622,7 @@ def set_auth_key_from_file(user,
             'Failed to pull key file from salt file server'
         )
 
-    s_keys = _validate_keys(lfile)
+    s_keys = _validate_keys(lfile, fingerprint_hash_type)
     if not s_keys:
         err = (
             'No keys detected in {0}. Is file properly formatted?'.format(
@@ -589,11 +638,12 @@ def set_auth_key_from_file(user,
             rval += set_auth_key(
                 user,
                 key,
-                s_keys[key]['enc'],
-                s_keys[key]['comment'],
-                s_keys[key]['options'],
-                config,
-                list(s_keys.keys())
+                enc=s_keys[key]['enc'],
+                comment=s_keys[key]['comment'],
+                options=s_keys[key]['options'],
+                config=config,
+                cache_keys=list(s_keys.keys()),
+                fingerprint_hash_type=fingerprint_hash_type
             )
         # Due to the ability for a single file to have multiple keys, it's
         # possible for a single call to this function to have both "replace"
@@ -616,7 +666,8 @@ def set_auth_key(
         comment='',
         options=None,
         config='.ssh/authorized_keys',
-        cache_keys=None):
+        cache_keys=None,
+        fingerprint_hash_type=None):
     '''
     Add a key to the authorized_keys file. The "key" parameter must only be the
     string of text that is the encoded key. If the key begins with "ssh-rsa"
@@ -638,7 +689,23 @@ def set_auth_key(
     uinfo = __salt__['user.info'](user)
     if not uinfo:
         return 'fail'
-    status = check_key(user, key, enc, comment, options, config, cache_keys)
+
+    # A 'valid key' to us pretty much means 'decodable as base64', which is
+    # the same filtering done when reading the authorized_keys file. Apply
+    # the same check to ensure we don't insert anything that will not
+    # subsequently be read)
+    key_is_valid = _fingerprint(key, fingerprint_hash_type) is not None
+    if not key_is_valid:
+        return 'Invalid public key'
+
+    status = check_key(user,
+                       key,
+                       enc,
+                       comment,
+                       options,
+                       config=config,
+                       cache_keys=cache_keys,
+                       fingerprint_hash_type=fingerprint_hash_type)
     if status == 'update':
         _replace_auth_key(user, key, enc, comment, options or [], config)
         return 'replace'
@@ -670,14 +737,16 @@ def set_auth_key(
             new_file = False
 
         try:
-            with salt.utils.fopen(fconfig, 'a+') as _fh:
+            with salt.utils.fopen(fconfig, 'ab+') as _fh:
                 if new_file is False:
                     # Let's make sure we have a new line at the end of the file
                     _fh.seek(1024, 2)
-                    if not _fh.read(1024).rstrip(' ').endswith('\n'):
+                    if not _fh.read(1024).rstrip(six.b(' ')).endswith(six.b('\n')):
                         _fh.seek(0, 2)
-                        _fh.write('\n')
-                _fh.write('{0}'.format(auth_line))
+                        _fh.write(six.b('\n'))
+                if six.PY3:
+                    auth_line = auth_line.encode(__salt_system_encoding__)
+                _fh.write(auth_line)
         except (IOError, OSError) as exc:
             msg = 'Could not write to key file: {0}'
             raise CommandExecutionError(msg.format(str(exc)))
@@ -694,7 +763,7 @@ def set_auth_key(
         return 'new'
 
 
-def _parse_openssh_output(lines):
+def _parse_openssh_output(lines, fingerprint_hash_type=None):
     '''
     Helper function which parses ssh-keygen -F and ssh-keyscan function output
     and yield dict with keys information, one by one.
@@ -706,7 +775,8 @@ def _parse_openssh_output(lines):
             hostname, enc, key = line.split()
         except ValueError:  # incorrect format
             continue
-        fingerprint = _fingerprint(key)
+        fingerprint = _fingerprint(key,
+                                   fingerprint_hash_type=fingerprint_hash_type)
         if not fingerprint:
             continue
         yield {'hostname': hostname, 'key': key, 'enc': enc,
@@ -714,7 +784,11 @@ def _parse_openssh_output(lines):
 
 
 @decorators.which('ssh-keygen')
-def get_known_host(user, hostname, config=None, port=None):
+def get_known_host(user,
+                   hostname,
+                   config=None,
+                   port=None,
+                   fingerprint_hash_type=None):
     '''
     Return information about known host from the configfile, if any.
     If there is no such key, return None.
@@ -735,7 +809,10 @@ def get_known_host(user, hostname, config=None, port=None):
     lines = __salt__['cmd.run'](cmd,
                                 ignore_retcode=True,
                                 python_shell=False).splitlines()
-    known_hosts = list(_parse_openssh_output(lines))
+    known_hosts = list(
+        _parse_openssh_output(lines,
+                              fingerprint_hash_type=fingerprint_hash_type)
+    )
     return known_hosts[0] if known_hosts else None
 
 
@@ -743,9 +820,9 @@ def get_known_host(user, hostname, config=None, port=None):
 def recv_known_host(hostname,
                     enc=None,
                     port=None,
-                    hash_hostname=True,
                     hash_known_hosts=True,
-                    timeout=5):
+                    timeout=5,
+                    fingerprint_hash_type=None):
     '''
     Retrieve information about host public key from remote server
 
@@ -761,13 +838,6 @@ def recv_known_host(hostname,
         used in case, if the public key will be requested from it. By default
         the port 22 is used.
 
-    hash_hostname : True
-        Hash all hostnames and addresses in the known hosts file.
-
-        .. deprecated:: Carbon
-
-            Please use hash_known_hosts instead.
-
     hash_known_hosts : True
         Hash all hostnames and addresses in the known hosts file.
 
@@ -779,21 +849,19 @@ def recv_known_host(hostname,
 
         .. versionadded:: 2016.3.0
 
+    fingerprint_hash_type
+        The public key fingerprint hash type that the public key fingerprint
+        was originally hashed with. This defaults to ``sha256`` if not specified.
+
+        .. versionadded:: 2016.11.4
+        .. versionchanged:: 2017.7.0: default changed from ``md5`` to ``sha256``
+
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' ssh.recv_known_host <hostname> enc=<enc> port=<port>
     '''
-
-    if not hash_hostname:
-        salt.utils.warn_until(
-            'Carbon',
-            'The hash_hostname parameter is misleading as ssh-keygen can only '
-            'hash the whole known hosts file, not entries for individual '
-            'hosts. Please use hash_known_hosts=False instead.')
-        hash_known_hosts = hash_hostname
-
     # The following list of OSes have an old version of openssh-clients
     # and thus require the '-t' option for ssh-keyscan
     need_dash_t = ('CentOS-5',)
@@ -809,13 +877,18 @@ def recv_known_host(hostname,
         cmd.append('-H')
     cmd.extend(['-T', str(timeout)])
     cmd.append(hostname)
-    lines = __salt__['cmd.run'](cmd, python_shell=False).splitlines()
-    known_hosts = list(_parse_openssh_output(lines))
+    lines = None
+    attempts = 5
+    while not lines and attempts > 0:
+        attempts = attempts - 1
+        lines = __salt__['cmd.run'](cmd, python_shell=False).splitlines()
+    known_hosts = list(_parse_openssh_output(lines,
+                                             fingerprint_hash_type=fingerprint_hash_type))
     return known_hosts[0] if known_hosts else None
 
 
 def check_known_host(user=None, hostname=None, key=None, fingerprint=None,
-                     config=None, port=None):
+                     config=None, port=None, fingerprint_hash_type=None):
     '''
     Check the record in known_hosts file, either by its value or by fingerprint
     (it's enough to set up either key or fingerprint, you don't need to set up
@@ -842,7 +915,11 @@ def check_known_host(user=None, hostname=None, key=None, fingerprint=None,
     else:
         config = config or '.ssh/known_hosts'
 
-    known_host = get_known_host(user, hostname, config=config, port=port)
+    known_host = get_known_host(user,
+                                hostname,
+                                config=config,
+                                port=port,
+                                fingerprint_hash_type=fingerprint_hash_type)
 
     if not known_host or 'fingerprint' not in known_host:
         return 'add'
@@ -894,10 +971,10 @@ def set_known_host(user=None,
                    key=None,
                    port=None,
                    enc=None,
-                   hash_hostname=True,
                    config=None,
                    hash_known_hosts=True,
-                   timeout=5):
+                   timeout=5,
+                   fingerprint_hash_type=None):
     '''
     Download SSH public key from remote host "hostname", optionally validate
     its fingerprint against "fingerprint" variable and save the record in the
@@ -912,7 +989,7 @@ def set_known_host(user=None,
         The name of the remote host (e.g. "github.com")
 
     fingerprint
-        The fingerprint of the key which must be presented in the known_hosts
+        The fingerprint of the key which must be present in the known_hosts
         file (optional if key specified)
 
     key
@@ -927,13 +1004,6 @@ def set_known_host(user=None,
     enc
         Defines what type of key is being used, can be ed25519, ecdsa ssh-rsa
         or ssh-dss
-
-    hash_hostname : True
-        Hash all hostnames and addresses in the known hosts file.
-
-        .. deprecated:: Carbon
-
-            Please use hash_known_hosts instead.
 
     config
         The location of the authorized keys file relative to the user's home
@@ -952,6 +1022,13 @@ def set_known_host(user=None,
 
         .. versionadded:: 2016.3.0
 
+    fingerprint_hash_type
+        The public key fingerprint hash type that the public key fingerprint
+        was originally hashed with. This defaults to ``sha256`` if not specified.
+
+        .. versionadded:: 2016.11.4
+        .. versionchanged:: 2017.7.0: default changed from ``md5`` to ``sha256``
+
     CLI Example:
 
     .. code-block:: bash
@@ -962,14 +1039,6 @@ def set_known_host(user=None,
         return {'status': 'error',
                 'error': 'hostname argument required'}
 
-    if not hash_hostname:
-        salt.utils.warn_until(
-            'Carbon',
-            'The hash_hostname parameter is misleading as ssh-keygen can only '
-            'hash the whole known hosts file, not entries for individual '
-            'hosts. Please use hash_known_hosts=False instead.')
-        hash_known_hosts = hash_hostname
-
     if port is not None and port != DEFAULT_SSH_PORT and hash_known_hosts:
         return {'status': 'error',
                 'error': 'argument port can not be used in '
@@ -977,7 +1046,11 @@ def set_known_host(user=None,
 
     update_required = False
     check_required = False
-    stored_host = get_known_host(user, hostname, config, port)
+    stored_host = get_known_host(user,
+                                 hostname,
+                                 config=config,
+                                 port=port,
+                                 fingerprint_hash_type=fingerprint_hash_type)
 
     if not stored_host:
         update_required = True
@@ -996,7 +1069,8 @@ def set_known_host(user=None,
                                       enc=enc,
                                       port=port,
                                       hash_known_hosts=hash_known_hosts,
-                                      timeout=timeout)
+                                      timeout=timeout,
+                                      fingerprint_hash_type=fingerprint_hash_type)
         if not remote_host:
             return {'status': 'error',
                     'error': 'Unable to receive remote host key'}
@@ -1133,7 +1207,7 @@ def user_keys(user=None, pubfile=None, prvfile=None):
             if os.path.exists(fn_):
                 try:
                     with salt.utils.fopen(fn_, 'r') as _fh:
-                        keys[u][keyname] = ''.join(_fh.readlines())
+                        keys[u][keyname] = ''.join(_fh.readlines()).strip()
                 except (IOError, OSError):
                     pass
 
@@ -1175,8 +1249,10 @@ def hash_known_hosts(user=None, config=None):
     if not os.path.isfile(full):
         return {'status': 'error',
                 'error': 'Known hosts file {0} does not exist'.format(full)}
+    origmode = os.stat(full).st_mode
     cmd = ['ssh-keygen', '-H', '-f', full]
     cmd_result = __salt__['cmd.run'](cmd, python_shell=False)
+    os.chmod(full, origmode)
     # ssh-keygen creates a new file, thus a chown is required.
     if os.geteuid() == 0 and user:
         uinfo = __salt__['user.info'](user)

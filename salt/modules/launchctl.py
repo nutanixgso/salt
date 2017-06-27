@@ -2,12 +2,17 @@
 '''
 Module for the management of MacOS systems that use launchd/launchctl
 
+.. important::
+    If you feel that Salt should be using this module to manage services on a
+    minion, and it is using a different module (or gives an error similar to
+    *'service.start' is not available*), see :ref:`here
+    <module-provider-override>`.
+
 :depends:   - plistlib Python module
 '''
-from __future__ import absolute_import
-from distutils.version import LooseVersion
 
 # Import python libs
+from __future__ import absolute_import
 import logging
 import os
 import plistlib
@@ -16,6 +21,7 @@ import re
 # Import salt libs
 import salt.utils
 import salt.utils.decorators as decorators
+from salt.utils.versions import LooseVersion as _LooseVersion
 import salt.ext.six as six
 
 # Set up logging
@@ -33,17 +39,17 @@ def __virtual__():
     '''
     if not salt.utils.is_darwin():
         return (False, 'Failed to load the mac_service module:\n'
-                       'Only available on Mac OS X systems.')
+                       'Only available on macOS systems.')
 
     if not os.path.exists('/bin/launchctl'):
         return (False, 'Failed to load the mac_service module:\n'
                        'Required binary not found: "/bin/launchctl"')
 
-    if LooseVersion(__grains__['osrelease']) >= LooseVersion('10.11'):
+    if _LooseVersion(__grains__['osrelease']) >= _LooseVersion('10.11'):
         return (False, 'Failed to load the mac_service module:\n'
                        'Not available on El Capitan, uses mac_service.py')
 
-    if LooseVersion(__grains__['osrelease']) >= LooseVersion('10.10'):
+    if _LooseVersion(__grains__['osrelease']) >= _LooseVersion('10.10'):
         global BEFORE_YOSEMITE
         BEFORE_YOSEMITE = False
 
@@ -97,11 +103,17 @@ def _available_services():
                         plist = plistlib.readPlistFromBytes(
                             salt.utils.to_bytes(plist_xml))
 
-                available_services[plist.Label.lower()] = {
-                    'filename': filename,
-                    'file_path': true_path,
-                    'plist': plist,
-                }
+                try:
+                    available_services[plist.Label.lower()] = {
+                        'filename': filename,
+                        'file_path': true_path,
+                        'plist': plist,
+                    }
+                except AttributeError:
+                    # As of MacOS 10.12 there might be plist files without Label key
+                    # in the searched directories. As these files do not represent
+                    # services, thay are not added to the list.
+                    pass
 
     return available_services
 
@@ -218,7 +230,10 @@ def status(job_label, runas=None):
 
     if launchctl_data:
         if BEFORE_YOSEMITE:
-            return 'PID' in dict(plistlib.readPlistFromString(launchctl_data))
+            if six.PY3:
+                return 'PID' in plistlib.loads(launchctl_data)
+            else:
+                return 'PID' in dict(plistlib.readPlistFromString(launchctl_data))
         else:
             pattern = '"PID" = [0-9]+;'
             return True if re.search(pattern, launchctl_data) else False

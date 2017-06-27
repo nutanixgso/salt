@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
-from __future__ import absolute_import
 
 # Import python libs
+from __future__ import absolute_import
 import fnmatch
 import glob
 import logging
-
-import yaml
 
 # Import salt libs
 import salt.runner
@@ -16,8 +14,11 @@ import salt.utils.cache
 import salt.utils.event
 import salt.utils.process
 import salt.defaults.exitcodes
-from salt.ext.six import string_types, iterkeys
-from salt._compat import string_types
+
+# Import 3rd-party libs
+import yaml
+import salt.ext.six as six
+
 log = logging.getLogger(__name__)
 
 
@@ -58,9 +59,11 @@ class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.stat
         react = {}
 
         if glob_ref.startswith('salt://'):
-            glob_ref = self.minion.functions['cp.cache_file'](glob_ref)
-
-        for fn_ in glob.glob(glob_ref):
+            glob_ref = self.minion.functions['cp.cache_file'](glob_ref) or ''
+        globbed_ref = glob.glob(glob_ref)
+        if not globbed_ref:
+            log.error('Can not render SLS {0} for tag {1}. File missing or not found.'.format(glob_ref, tag))
+        for fn_ in globbed_ref:
             try:
                 res = self.render_template(
                     fn_,
@@ -84,7 +87,7 @@ class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.stat
         '''
         log.debug('Gathering reactors for tag {0}'.format(tag))
         reactors = []
-        if isinstance(self.opts['reactor'], string_types):
+        if isinstance(self.opts['reactor'], six.string_types):
             try:
                 with salt.utils.fopen(self.opts['reactor']) as fp_:
                     react_map = yaml.safe_load(fp_.read())
@@ -107,10 +110,10 @@ class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.stat
                 continue
             if len(ropt) != 1:
                 continue
-            key = next(iterkeys(ropt))
+            key = next(six.iterkeys(ropt))
             val = ropt[key]
             if fnmatch.fnmatch(tag, key):
-                if isinstance(val, string_types):
+                if isinstance(val, six.string_types):
                     reactors.append(val)
                 elif isinstance(val, list):
                     reactors.extend(val)
@@ -120,7 +123,7 @@ class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.stat
         '''
         Return a list of the reactors
         '''
-        if isinstance(self.minion.opts['reactor'], string_types):
+        if isinstance(self.minion.opts['reactor'], six.string_types):
             log.debug('Reading reactors from yaml {0}'.format(self.opts['reactor']))
             try:
                 with salt.utils.fopen(self.opts['reactor']) as fp_:
@@ -148,7 +151,7 @@ class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.stat
         '''
         reactors = self.list_all()
         for reactor in reactors:
-            _tag = next(iterkeys(reactor))
+            _tag = next(six.iterkeys(reactor))
             if _tag == tag:
                 return {'status': False, 'comment': 'Reactor already exists.'}
 
@@ -161,7 +164,7 @@ class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.stat
         '''
         reactors = self.list_all()
         for reactor in reactors:
-            _tag = next(iterkeys(reactor))
+            _tag = next(six.iterkeys(reactor))
             if _tag == tag:
                 self.minion.opts['reactor'].remove(reactor)
                 return {'status': True, 'comment': 'Reactor deleted.'}
@@ -205,7 +208,7 @@ class Reactor(salt.utils.process.SignalHandlingMultiprocessingProcess, salt.stat
 
         # instantiate some classes inside our new process
         self.event = salt.utils.event.get_event(
-                'master',
+                self.opts['__role'],
                 self.opts['sock_dir'],
                 self.opts['transport'],
                 opts=self.opts,
@@ -305,6 +308,13 @@ class ReactWrap(object):
         '''
         if 'runner' not in self.client_cache:
             self.client_cache['runner'] = salt.runner.RunnerClient(self.opts)
+            # The len() function will cause the module functions to load if
+            # they aren't already loaded. We want to load them so that the
+            # spawned threads don't need to load them. Loading in the spawned
+            # threads creates race conditions such as sometimes not finding
+            # the required function because another thread is in the middle
+            # of loading the functions.
+            len(self.client_cache['runner'].functions)
         try:
             self.pool.fire_async(self.client_cache['runner'].low, args=(fun, kwargs))
         except SystemExit:
@@ -318,6 +328,13 @@ class ReactWrap(object):
         '''
         if 'wheel' not in self.client_cache:
             self.client_cache['wheel'] = salt.wheel.Wheel(self.opts)
+            # The len() function will cause the module functions to load if
+            # they aren't already loaded. We want to load them so that the
+            # spawned threads don't need to load them. Loading in the spawned
+            # threads creates race conditions such as sometimes not finding
+            # the required function because another thread is in the middle
+            # of loading the functions.
+            len(self.client_cache['wheel'].functions)
         try:
             self.pool.fire_async(self.client_cache['wheel'].low, args=(fun, kwargs))
         except SystemExit:
@@ -330,7 +347,7 @@ class ReactWrap(object):
         Wrap Caller to enable executing :ref:`caller modules <all-salt.caller>`
         '''
         log.debug("in caller with fun {0} args {1} kwargs {2}".format(fun, args, kwargs))
-        args = kwargs['args']
+        args = kwargs.get('args', [])
         if 'caller' not in self.client_cache:
             self.client_cache['caller'] = salt.client.Caller(self.opts['conf_file'])
         try:

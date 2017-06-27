@@ -278,7 +278,7 @@ class ProcessManager(object):
             kwargs = {}
 
         if salt.utils.is_windows():
-            # Need to ensure that 'log_queue' is correctly transfered to
+            # Need to ensure that 'log_queue' is correctly transferred to
             # processes that inherit from 'MultiprocessingProcess'.
             if type(MultiprocessingProcess) is type(tgt) and (
                     issubclass(tgt, MultiprocessingProcess)):
@@ -328,6 +328,8 @@ class ProcessManager(object):
         '''
         Create new process (assuming this one is dead), then remove the old one
         '''
+        if self._restart_processes is False:
+            return
         log.info('Process {0} ({1}) died with exit status {2},'
                  ' restarting...'.format(self._process_map[pid]['tgt'],
                                          pid,
@@ -344,12 +346,26 @@ class ProcessManager(object):
     def stop_restarting(self):
         self._restart_processes = False
 
-    def send_signal_to_processes(self, signal):
+    def send_signal_to_processes(self, signal_):
+        if (salt.utils.is_windows() and
+                signal_ in (signal.SIGTERM, signal.SIGINT)):
+            # On Windows, the subprocesses automatically have their signal
+            # handlers invoked. If you send one of these signals while the
+            # signal handler is running, it will kill the process where it
+            # is currently running and the signal handler will not finish.
+            # This will also break the process tree: children of killed
+            # children will become parentless and not findable when trying
+            # to kill the process tree (they don't inherit their parent's
+            # parent). Hence the 'MWorker' processes would be left over if
+            # the 'ReqServer' process is killed this way since 'taskkill'
+            # with the tree option will not be able to find them.
+            return
+
         for pid in six.iterkeys(self._process_map.copy()):
             try:
-                os.kill(pid, signal)
+                os.kill(pid, signal_)
             except OSError as exc:
-                if exc.errno != errno.ESRCH:
+                if exc.errno not in (errno.ESRCH, errno.EACCES):
                     # If it's not a "No such process" error, raise it
                     raise
                 # Otherwise, it's a dead process, remove it from the process map
@@ -365,10 +381,10 @@ class ProcessManager(object):
 
         # make sure to kill the subprocesses if the parent is killed
         if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
-            # There are not SIGTERM handlers installed, install ours
+            # There are no SIGTERM handlers installed, install ours
             signal.signal(signal.SIGTERM, self.kill_children)
         if signal.getsignal(signal.SIGINT) is signal.SIG_DFL:
-            # There are not SIGTERM handlers installed, install ours
+            # There are no SIGINT handlers installed, install ours
             signal.signal(signal.SIGINT, self.kill_children)
 
         while True:
@@ -376,21 +392,23 @@ class ProcessManager(object):
             try:
                 # in case someone died while we were waiting...
                 self.check_children()
-
-                if not salt.utils.is_windows() and not async:
-                    pid, exit_status = os.wait()
-                    if pid not in self._process_map:
-                        log.debug('Process of pid {0} died, not a known'
-                                  ' process, will not restart'.format(pid))
-                        continue
-                    self.restart_process(pid)
-                elif async is True:
+                # The event-based subprocesses management code was removed from here
+                # because os.wait() conflicts with the subprocesses management logic
+                # implemented in `multiprocessing` package. See #35480 for details.
+                if async:
                     yield gen.sleep(10)
-                elif async is False:
-                    # os.wait() is not supported on Windows.
+                else:
                     time.sleep(10)
+                if len(self._process_map) == 0:
+                    break
             # OSError is raised if a signal handler is called (SIGTERM) during os.wait
             except OSError:
+                break
+            except IOError as exc:
+                # IOError with errno of EINTR (4) may be raised
+                # when using time.sleep() on Windows.
+                if exc.errno != errno.EINTR:
+                    raise
                 break
 
     def check_children(self):
@@ -400,12 +418,17 @@ class ProcessManager(object):
         if self._restart_processes is True:
             for pid, mapping in six.iteritems(self._process_map):
                 if not mapping['Process'].is_alive():
+                    log.trace('Process restart of {0}'.format(pid))
                     self.restart_process(pid)
 
     def kill_children(self, *args, **kwargs):
         '''
         Kill all of the children
         '''
+        # first lets reset signal handlers to default one to prevent running this twice
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
         # check that this is the correct process, children inherit this
         # handler, if we are in a child lets just run the original handler
         if os.getpid() != self._pid:
@@ -416,7 +439,14 @@ class ProcessManager(object):
             else:
                 return
         if salt.utils.is_windows():
-            with open(os.devnull, 'wb') as devnull:
+            if multiprocessing.current_process().name != 'MainProcess':
+                # Since the main process will kill subprocesses by tree,
+                # no need to do anything in the subprocesses.
+                # Sometimes, when both a subprocess and the main process
+                # call 'taskkill', it will leave a 'taskkill' zombie process.
+                # We want to avoid this.
+                return
+            with salt.utils.fopen(os.devnull, 'wb') as devnull:
                 for pid, p_map in six.iteritems(self._process_map):
                     # On Windows, we need to explicitly terminate sub-processes
                     # because the processes don't have a sigterm handler.
@@ -430,11 +460,14 @@ class ProcessManager(object):
                 log.trace('Terminating pid {0}: {1}'.format(pid, p_map['Process']))
                 if args:
                     # escalate the signal to the process
-                    os.kill(pid, args[0])
+                    try:
+                        os.kill(pid, args[0])
+                    except OSError:
+                        pass
                 try:
                     p_map['Process'].terminate()
                 except OSError as exc:
-                    if exc.errno != errno.ESRCH:
+                    if exc.errno not in (errno.ESRCH, errno.EACCES):
                         raise
                 if not p_map['Process'].is_alive():
                     try:
@@ -474,8 +507,9 @@ class ProcessManager(object):
                     continue
                 log.trace('Killing pid {0}: {1}'.format(pid, p_map['Process']))
                 try:
-                    os.kill(signal.SIGKILL, pid)
-                except OSError:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError as exc:
+                    log.exception(exc)
                     # in case the process has since decided to die, os.kill returns OSError
                     if not p_map['Process'].is_alive():
                         # The process is no longer alive, remove it from the process map dictionary
@@ -645,6 +679,8 @@ class SignalHandlingMultiprocessingProcess(MultiprocessingProcess):
         signal.signal(signal.SIGTERM, self._handle_signals)
 
     def _handle_signals(self, signum, sigframe):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         msg = '{0} received a '.format(self.__class__.__name__)
         if signum == signal.SIGINT:
             msg += 'SIGINT'
@@ -652,7 +688,13 @@ class SignalHandlingMultiprocessingProcess(MultiprocessingProcess):
             msg += 'SIGTERM'
         msg += '. Exiting'
         log.debug(msg)
-        exit(salt.defaults.exitcodes.EX_OK)
+        if HAS_PSUTIL:
+            process = psutil.Process(self.pid)
+            if hasattr(process, 'children'):
+                for child in process.children(recursive=True):
+                    if child.is_running():
+                        child.terminate()
+        sys.exit(salt.defaults.exitcodes.EX_OK)
 
     def start(self):
         with default_signals(signal.SIGINT, signal.SIGTERM):
@@ -663,8 +705,17 @@ class SignalHandlingMultiprocessingProcess(MultiprocessingProcess):
 def default_signals(*signals):
     old_signals = {}
     for signum in signals:
-        old_signals[signum] = signal.getsignal(signum)
-        signal.signal(signum, signal.SIG_DFL)
+        try:
+            old_signals[signum] = signal.getsignal(signum)
+            signal.signal(signum, signal.SIG_DFL)
+        except ValueError as exc:
+            # This happens when a netapi module attempts to run a function
+            # using wheel_async, because the process trying to register signals
+            # will not be the main PID.
+            log.trace(
+                'Failed to register signal for signum %d: %s',
+                signum, exc
+            )
 
     # Do whatever is needed with the reset signals
     yield

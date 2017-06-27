@@ -5,7 +5,7 @@ Connection module for Amazon ELB
 .. versionadded:: 2014.7.0
 
 :configuration: This module accepts explicit elb credentials but can also utilize
-    IAM roles assigned to the instance trough Instance Profiles. Dynamic
+    IAM roles assigned to the instance through Instance Profiles. Dynamic
     credentials are then automatically obtained from AWS API and no further
     configuration is necessary. More Information available at:
 
@@ -42,21 +42,26 @@ Connection module for Amazon ELB
 :depends: boto >= 2.33.0
 '''
 # keep lint from choking on _get_conn and _cache_id
-#pylint: disable=E0602
+# pylint: disable=E0602
 
 from __future__ import absolute_import
 
 # Import Python libs
 import logging
-from distutils.version import LooseVersion as _LooseVersion  # pylint: disable=import-error,no-name-in-module
 import json
-import salt.ext.six as six
 
 log = logging.getLogger(__name__)
 
+# Import Salt libs
+import salt.utils.odict as odict
+from salt.utils.versions import LooseVersion as _LooseVersion
+
 # Import third party libs
+import salt.ext.six as six
+from salt.ext.six import string_types
 try:
     import boto
+    import boto.ec2  # pylint: enable=unused-import
     # connection settings were added in 2.33.0
     required_boto_version = '2.33.0'
     if (_LooseVersion(boto.__version__) <
@@ -64,7 +69,6 @@ try:
         msg = 'boto_elb requires boto {0}.'.format(required_boto_version)
         logging.debug(msg)
         raise ImportError()
-    import boto.ec2
     from boto.ec2.elb import HealthCheck
     from boto.ec2.elb.attributes import AccessLogAttribute
     from boto.ec2.elb.attributes import ConnectionDrainingAttribute
@@ -74,10 +78,6 @@ try:
     HAS_BOTO = True
 except ImportError:
     HAS_BOTO = False
-
-# Import Salt libs
-from salt.ext.six import string_types
-import salt.utils.odict as odict
 
 
 def __virtual__():
@@ -111,13 +111,47 @@ def exists(name, region=None, key=None, keyid=None, profile=None):
             log.debug(msg)
             return False
     except boto.exception.BotoServerError as error:
-        log.debug(error)
+        log.warning(error)
         return False
+
+
+def get_all_elbs(region=None, key=None, keyid=None, profile=None):
+    '''
+    Return all load balancers associated with an account
+
+    CLI example:
+
+    .. code-block:: bash
+
+        salt myminion boto_elb.get_all_elbs region=us-east-1
+    '''
+    conn = _get_conn(region=region, key=key, keyid=keyid, profile=profile)
+
+    try:
+        return [e for e in conn.get_all_load_balancers()]
+    except boto.exception.BotoServerError as error:
+        log.warning(error)
+        return []
+
+
+def list_elbs(region=None, key=None, keyid=None, profile=None):
+    '''
+    Return names of all load balancers associated with an account
+
+    CLI example:
+
+    .. code-block:: bash
+
+        salt myminion boto_elb.list_elbs region=us-east-1
+    '''
+
+    return [e.name for e in get_all_elbs(region=region, key=key, keyid=keyid,
+                                         profile=profile)]
 
 
 def get_elb_config(name, region=None, key=None, keyid=None, profile=None):
     '''
-    Check to see if an ELB exists.
+    Get an ELB configuration.
 
     CLI example:
 
@@ -219,10 +253,11 @@ def create(name, availability_zones, listeners, subnets=None,
     _complex_listeners = []
     for listener in listeners:
         _complex_listeners.append(listener_dict_to_tuple(listener))
+
     try:
-        lb = conn.create_load_balancer(name, availability_zones, [],
-                                       subnets, security_groups, scheme,
-                                       _complex_listeners)
+        lb = conn.create_load_balancer(name=name, zones=availability_zones, subnets=subnets,
+                                       security_groups=security_groups, scheme=scheme,
+                                       complex_listeners=_complex_listeners)
         if lb:
             log.info('Created ELB {0}'.format(name))
             return True
@@ -500,6 +535,37 @@ def set_attributes(name, attributes, region=None, key=None, keyid=None,
     '''
     Set attributes on an ELB.
 
+    name (string)
+        Name of the ELB instance to set attributes for
+
+    attributes
+        A dict of attributes to set.
+
+        Valid attributes are:
+
+        access_log (dict)
+            enabled (bool)
+                Enable storage of access logs.
+            s3_bucket_name (string)
+                The name of the S3 bucket to place logs.
+            s3_bucket_prefix (string)
+                Prefix for the log file name.
+            emit_interval (int)
+                Interval for storing logs in S3 in minutes. Valid values are
+                5 and 60.
+
+        connection_draining (dict)
+            enabled (bool)
+                Enable connection draining.
+            timeout (int)
+                Maximum allowed time in seconds for sending existing
+                connections to an instance that is deregistering or unhealthy.
+                Default is 300.
+
+        cross_zone_load_balancing (dict)
+            enabled (bool)
+                Enable cross-zone load balancing.
+
     CLI example to set attributes on an ELB:
 
     .. code-block:: bash
@@ -715,6 +781,33 @@ def deregister_instances(name, instances, region=None, key=None, keyid=None,
     else:
         deregister_result = True
     return deregister_result
+
+
+def set_instances(name, instances, test=False, region=None, key=None, keyid=None,
+                         profile=None):
+    '''
+    Set the instances assigned to an ELB to exactly the list given
+
+    CLI example:
+
+    .. code-block:: bash
+
+        salt myminion boto_elb.set_instances myelb region=us-east-1 instances="[instance_id,instance_id]"
+    '''
+    ret = True
+    current = set([i['instance_id'] for i in get_instance_health(name, region, key, keyid, profile)])
+    desired = set(instances)
+    add = desired - current
+    remove = current - desired
+    if test:
+        return bool(add or remove)
+    if len(remove):
+        if deregister_instances(name, list(remove), region, key, keyid, profile) is False:
+            ret = False
+    if len(add):
+        if register_instances(name, list(add), region, key, keyid, profile) is False:
+            ret = False
+    return ret
 
 
 def get_instance_health(name, region=None, key=None, keyid=None, profile=None, instances=None):

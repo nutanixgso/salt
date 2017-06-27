@@ -4,6 +4,8 @@ from __future__ import print_function
 
 from calendar import month_abbr as months
 import datetime
+import hashlib
+import os
 
 from salt.ext import six
 
@@ -93,3 +95,20 @@ def format_jid_instance_ext(jid, job):
         'JID': jid,
         'StartTime': jid_to_time(jid)})
     return ret
+
+
+def jid_dir(jid, job_dir=None, hash_type='sha256'):
+    '''
+    Return the jid_dir for the given job id
+    '''
+    if not isinstance(jid, six.string_types):
+        jid = str(jid)
+    if six.PY3:
+        jid = jid.encode('utf-8')
+    jhash = getattr(hashlib, hash_type)(jid).hexdigest()
+
+    parts = []
+    if job_dir is not None:
+        parts.append(job_dir)
+    parts.extend([jhash[:2], jhash[2:]])
+    return os.path.join(*parts)

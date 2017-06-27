@@ -1,6 +1,14 @@
 # -*- coding: utf-8 -*-
 '''
 Manage users with the useradd command
+
+.. important::
+
+    If you feel that Salt should be using this module to manage users on a
+    minion, and it is using a different module (or gives an error similar to
+    *'user.info' is not available*), see :ref:`here
+    <module-provider-override>`.
+
 '''
 
 # Import python libs
@@ -424,6 +432,16 @@ def list_groups(name):
         salt '*' user.list_groups foo
     '''
     return salt.utils.get_group_list(name)
+
+
+def list_users():
+    '''
+    Return a list of all users
+    CLI Example:
+    .. code-block:: bash
+        salt '*' user.list_users
+    '''
+    return sorted([user.pw_name for user in pwd.getpwall()])
 
 
 def rename(name, new_name):

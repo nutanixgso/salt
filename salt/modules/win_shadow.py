@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 '''
 Manage the shadow file
+
+.. important::
+    If you feel that Salt should be using this module to manage passwords on a
+    minion, and it is using a different module (or gives an error similar to
+    *'shadow.info' is not available*), see :ref:`here
+    <module-provider-override>`.
 '''
 from __future__ import absolute_import
 
@@ -66,6 +72,12 @@ def set_expire(name, expire):
 
     :return: True if successful. False if unsuccessful.
     :rtype: bool
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' shadow.set_expire <username> 2016/7/1
     '''
     return __salt__['user.update'](name, expiration_date=expire)
 
@@ -78,6 +90,12 @@ def require_password_change(name):
 
     :return: True if successful. False if unsuccessful.
     :rtype: bool
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' shadow.require_password_change <username>
     '''
     return __salt__['user.update'](name, expired=True)
 
@@ -90,6 +108,12 @@ def unlock_account(name):
 
     :return: True if successful. False if unsuccessful.
     :rtype: bool
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' shadow.unlock_account <username>
     '''
     return __salt__['user.update'](name, unlock_account=True)
 

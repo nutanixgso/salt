@@ -49,7 +49,7 @@ data in pillar. Here's an example pillar structure:
           - 'server-1': blade1
           - 'server-2': blade2
 
-        blades:
+        servers:
           server-1:
             idrac_password: saltstack1
             ipmi_over_lan: True
@@ -114,8 +114,8 @@ pillar stated above:
           - server-3: powercycle
           - server-4: powercycle
 
-    # Set idrac_passwords for blades
-    {% for k, v in details['blades'].iteritems() %}
+    # Set idrac_passwords for blades.  racadm needs them to be called 'server-x'
+    {% for k, v in details['servers'].iteritems() %}
     {{ k }}:
       dellchassis.blade_idrac:
         - idrac_password: {{ v['idrac_password'] }}
@@ -159,9 +159,12 @@ from __future__ import absolute_import
 import logging
 import os
 
-log = logging.getLogger(__name__)
-
+# Import Salt lobs
+import salt.ext.six as six
 from salt.exceptions import CommandExecutionError
+
+# Get logging started
+log = logging.getLogger(__name__)
 
 
 def __virtual__():
@@ -175,7 +178,10 @@ def blade_idrac(name, idrac_password=None, idrac_ipmi=None,
     '''
     Set parameters for iDRAC in a blade.
 
-    :param idrac_password: Password to establish for the iDRAC interface
+    :param idrac_password: Password to use to connect to the iDRACs directly
+    (idrac_ipmi and idrac_dnsname must be set directly on the iDRAC.  They
+    can't be set through the CMC.  If this password is present, use it
+    instead of the CMC password)
     :param idrac_ipmi: Enable/Disable IPMI over LAN
     :param idrac_ip: Set IP address for iDRAC
     :param idrac_netmask: Set netmask for iDRAC
@@ -465,7 +471,7 @@ def chassis(name, chassis_name=None, password=None, datacenter=None,
                     target_power_states[key] = 'powerup'
                 if current_power_states[key] != -1 and current_power_states[key]:
                     target_power_states[key] = 'powercycle'
-        for k, v in target_power_states.iteritems():
+        for k, v in six.iteritems(target_power_states):
             old = {k: current_power_states[k]}
             new = {k: v}
             if ret['changes'].get('Blade Power States') is None:
@@ -493,7 +499,7 @@ def chassis(name, chassis_name=None, password=None, datacenter=None,
         pw_single = True
         if __salt__[chassis_cmd]('change_password', username='root', uid=1,
                                    password=password):
-            for blade in inventory['server'].keys():
+            for blade in inventory['server']:
                 pw_single = __salt__[chassis_cmd]('deploy_password',
                                                   username='root',
                                                   password=password,
@@ -525,7 +531,7 @@ def chassis(name, chassis_name=None, password=None, datacenter=None,
             slot_names = True
 
     powerchange_all_ok = True
-    for k, v in target_power_states.iteritems():
+    for k, v in six.iteritems(target_power_states):
         powerchange_ok = __salt__[chassis_cmd]('server_power', v, module=k)
         if not powerchange_ok:
             powerchange_all_ok = False
