@@ -405,6 +405,7 @@ class CloudClient(object):
 
             vm_['name'] = name
             vm_['driver'] = provider
+            vm_['provider'] = provider
             vm_['profile'] = None
             ret[name] = salt.utils.simple_types_filter(
                 mapper.create(vm_))
