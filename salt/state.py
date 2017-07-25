@@ -577,6 +577,8 @@ class Compiler(object):
                 if '__env__' in body:
                     chunk['__env__'] = body['__env__']
                 chunk['__id__'] = name
+                chunk['arg'] = []
+                chunk['kwarg'] = {}
                 for arg in run:
                     if isinstance(arg, six.string_types):
                         funcs.add(arg)
@@ -589,7 +591,7 @@ class Compiler(object):
                                         names.append(_name)
                                 continue
                             else:
-                                chunk.update(arg)
+                                chunk['kwarg'].update(arg)
                 if names:
                     name_order = 1
                     for entry in names:
@@ -677,8 +679,17 @@ class State(object):
             except AttributeError:
                 pillar_enc = str(pillar_enc).lower()
         self._pillar_enc = pillar_enc
-        self.opts['pillar'] = initial_pillar if initial_pillar is not None \
-            else self._gather_pillar()
+        if initial_pillar is not None:
+            self.opts['pillar'] = initial_pillar
+            if self._pillar_override:
+                self.opts['pillar'] = salt.utils.dictupdate.merge(
+                    self.opts['pillar'],
+                    self._pillar_override,
+                    self.opts.get('pillar_source_merging_strategy', 'smart'),
+                    self.opts.get('renderer', 'yaml'),
+                    self.opts.get('pillar_merge_lists', False))
+        else:
+            self.opts['pillar'] = self._gather_pillar()
         self.state_con = context or {}
         self.load_modules()
         self.active = set()
@@ -761,7 +772,7 @@ class State(object):
             agg_opt = low['aggregate']
         if agg_opt is True:
             agg_opt = [low['state']]
-        else:
+        elif not isinstance(agg_opt, list):
             return low
         if low['state'] in agg_opt and not low.get('__agg__'):
             agg_fun = '{0}.mod_aggregate'.format(low['state'])

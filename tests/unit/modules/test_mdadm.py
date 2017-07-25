@@ -37,7 +37,9 @@ class MdadmTestCase(TestCase, LoaderModuleMockMixin):
                     chunk=256
             )
             self.assertEqual('salt', ret)
-            mock.assert_called_once()
+
+            self.assert_called_once(mock)
+
             args, kwargs = mock.call_args
             # expected cmd is
             # mdadm -C /dev/md0 -R -v --chunk 256 --force -l 5 -e default -n 3 /dev/sdb1 /dev/sdc1 /dev/sdd1
