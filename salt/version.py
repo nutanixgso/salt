@@ -502,7 +502,7 @@ def __discover_version(saltstack_version):
             kwargs['close_fds'] = True
 
         process = subprocess.Popen(
-            ['git', 'describe', '--tags', '--first-parent', '--match', 'v[0-9]*', '--always'], **kwargs)
+            ['git', 'describe', '--tags', '--match', 'v[0-9]*', '--always'], **kwargs)
 
         out, err = process.communicate()
 
