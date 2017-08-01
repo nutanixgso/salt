@@ -713,4 +713,10 @@ def wait_for_task(task, instance_name, task_type, sleep_seconds=1, log_level='de
         else:
             log.debug(msg)
     else:
-        raise Exception(task.info.error)
+        # NOTE: Raise Exception if there is an error
+        # In vCenter 6.5 Clone and Delete VM fails as task.info.error is None
+        if task.info.error:
+            raise Exception(task.info.error)
+        else:
+            log.error('Something went wrong with instance: {} task_type: {} task_info: {} task_state: {}'.format(
+                instance_name, task_type, task.info, task.info.state))
