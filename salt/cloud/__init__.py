@@ -394,7 +394,7 @@ class CloudClient(object):
             names = names.split(',')
         ret = {}
         for name in names:
-            vm_ = kwargs['kwargs'].copy()
+            vm_ = kwargs.copy()
 
             # Since using "provider: <provider-engine>" is deprecated, alias provider
             # to use driver: "driver: <provider-engine>"
