@@ -2699,7 +2699,10 @@ def create(vm_):
         )
 
     event_kwargs = vm_.copy()
-    del event_kwargs['password']
+    try:
+        del event_kwargs['password']
+    except:
+        log.warning('Key "password" not found in event_kwargs')
 
     try:
         __utils__['cloud.fire_event'](
