@@ -214,12 +214,12 @@ def script(vm_):
     if not script_name:
         script_name = 'bootstrap-salt'
 
-    return salt.utils.cloud.os_script(
+    return __utils__['cloud.os_script'](
         script_name,
         vm_,
         __opts__,
-        salt.utils.cloud.salt_config_to_yaml(
-            salt.utils.cloud.minion_config(__opts__, vm_)
+        __utils__['cloud.salt_config_to_yaml'](
+            __utils__['cloud.minion_config'](__opts__, vm_)
         )
     )
 
@@ -2805,7 +2805,7 @@ def create(vm_):
                 vm_['key_filename'] = key_filename
                 vm_['ssh_host'] = ip
 
-                out = salt.utils.cloud.bootstrap(vm_, __opts__)
+                out = __utils__['cloud.bootstrap'](vm_, __opts__)
         else:
             raise SaltCloudSystemExit(
                 "[ {0} ] Unable to retrieve IPv4 information after waiting for {1} seconds".format(vm_name, wait_for_ip_timeout))
