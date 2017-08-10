@@ -10,13 +10,14 @@ Support for PowerShell
 '''
 from __future__ import absolute_import, unicode_literals
 
-# Import python libs
+# Import Python libs
 import copy
 import logging
 import json
 
-# Import salt libs
+# Import Salt libs
 import salt.utils
+import salt.utils.platform
 from salt.exceptions import CommandExecutionError
 
 # Set up logging
@@ -31,7 +32,7 @@ def __virtual__():
     Set the system module of the kernel is Windows
     '''
     # Verify Windows
-    if not salt.utils.is_windows():
+    if not salt.utils.platform.is_windows():
         log.debug('Module PSGet: Only available on Windows systems')
         return False, 'Module PSGet: Only available on Windows systems'
 
@@ -72,33 +73,6 @@ def _pshell(cmd, cwd=None, json_depth=2):
         raise CommandExecutionError('No JSON results from powershell', info=results)
 
     return ret
-
-
-def psversion():
-    '''
-    Returns the Powershell version
-
-    This has been deprecated and has been replaced by ``cmd.shell_info`` Note
-    the minimum version return is 5 as ``dsc`` is not available for version
-    less than 5.  This function will be removed in 'Oxygen' release.
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt 'win01' dsc.psversion
-    '''
-    salt.utils.warn_until('Oxygen',
-        'The \'psversion\' has been deprecated and has been '
-        'replaced by \'cmd.shell_info\'.'
-    )
-    powershell_info = __salt__['cmd.shell_info']('powershell')
-    if powershell_info['installed']:
-        try:
-            return int(powershell_info['version'].split('.')[0])
-        except ValueError:
-            pass
-    return 0
 
 
 def bootstrap():

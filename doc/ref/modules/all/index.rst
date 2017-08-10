@@ -9,6 +9,7 @@ execution modules
     .. toctree::
 
         salt.modules.group
+        salt.modules.kernelpkg
         salt.modules.pkg
         salt.modules.user
 
@@ -37,7 +38,6 @@ execution modules
     bcache
     beacons
     bigip
-    blockdev
     bluez
     boto3_elasticache
     boto3_route53
@@ -191,14 +191,21 @@ execution modules
     k8s
     kapacitor
     kerberos
+    kernelpkg_linux_apt
+    kernelpkg_linux_yum
     key
     keyboard
     keystone
     kmod
+    kubernetes
     launchctl
     layman
     ldap3
     ldapmod
+    libcloud_compute
+    libcloud_dns
+    libcloud_loadbalancer
+    libcloud_storage
     linux_acl
     linux_ip
     linux_lvm
@@ -292,6 +299,7 @@ execution modules
     opkg
     oracle
     osquery
+    out
     pacman
     pagerduty
     pagerduty_util
