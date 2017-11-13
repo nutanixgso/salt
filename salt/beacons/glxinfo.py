@@ -10,7 +10,7 @@ from __future__ import absolute_import
 import logging
 
 # Salt libs
-import salt.utils
+import salt.utils.path
 
 log = logging.getLogger(__name__)
 
@@ -21,14 +21,14 @@ last_state = {}
 
 def __virtual__():
 
-    which_result = salt.utils.which('glxinfo')
+    which_result = salt.utils.path.which('glxinfo')
     if which_result is None:
         return False
     else:
         return __virtualname__
 
 
-def validate(config):
+def __validate__(config):
     '''
     Validate the beacon configuration
     '''
@@ -59,7 +59,7 @@ def beacon(config):
     log.trace('glxinfo beacon starting')
     ret = []
 
-    _validate = validate(config)
+    _validate = __validate__(config)
     if not _validate[0]:
         return ret
 

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 '''
 Allows you to manage extended attributes on files or directories
-=======================
+================================================================
 
-Install, enable and disable assitive access on OS X minions
+Install, enable and disable assistive access on macOS minions
 
 .. code-block:: yaml
 
@@ -42,7 +42,7 @@ def exists(name, attributes):
     attributes
         The attributes that should exist on the file/directory, this is accepted as
         an array, with key and value split with an equals sign, if you want to specify
-        a hex value then add 0x to the begining of the value.
+        a hex value then add 0x to the beginning of the value.
 
     '''
     ret = {'name': name,

@@ -1,3 +1,5 @@
+.. _salt-cloud-config:
+
 ==================
 Core Configuration
 ==================
@@ -39,11 +41,26 @@ be used here.
 In particular, this is the location to specify the location of the salt master
 and its listening port, if the port is not set to the default.
 
+Similar to most other settings, Minion configuration settings are inherited
+across configuration files. For example, the master setting might be contained
+in the main ``cloud`` configuration file as demonstrated above, but additional
+settings can be placed in the provider or profile:
+
+.. code-block:: yaml
+
+    ec2-web:
+      size: t1.micro
+      minion:
+        environment: test
+        startup_states: sls
+        sls_list:
+          - web
 
 Cloud Configuration Syntax
 ==========================
 
-The data specific to interacting with public clouds is set up here.
+The data specific to interacting with public clouds is set up :ref:`here
+<cloud-provider-specifics>`.
 
 Cloud provider configuration settings can live in several places. The first is in
 ``/etc/salt/cloud``:
@@ -80,7 +97,7 @@ Using the example configuration above:
 
 .. note::
 
-    Salt Cloud provider configurations within ``/etc/cloud.provider.d/ should not
+    Salt Cloud provider configurations within ``/etc/cloud.provider.d/`` should not
     specify the ``providers`` starting key.
 
 It is also possible to have multiple cloud configuration blocks within the same alias block.
@@ -354,7 +371,6 @@ both.
       compute_name: cloudServersOpenStack
       protocol: ipv4
       compute_region: DFW
-      protocol: ipv4
       user: myuser
       tenant: 5555555
       password: mypass

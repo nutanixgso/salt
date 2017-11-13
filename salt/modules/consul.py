@@ -12,6 +12,7 @@ from __future__ import absolute_import
 # Import 3rd-party libs
 # pylint: disable=import-error,no-name-in-module,redefined-builtin
 from salt.ext.six.moves.urllib.parse import urljoin as _urljoin
+import salt.ext.six
 import salt.ext.six.moves.http_client
 # pylint: enable=import-error,no-name-in-module
 
@@ -84,7 +85,7 @@ def _query(function,
     )
 
     if result.get('status', None) == salt.ext.six.moves.http_client.OK:
-        ret['data'] = result['dict']
+        ret['data'] = result.get('dict', result)
         ret['res'] = True
     elif result.get('status', None) == salt.ext.six.moves.http_client.NO_CONTENT:
         ret['res'] = False
@@ -92,7 +93,6 @@ def _query(function,
         ret['data'] = 'Key not found.'
         ret['res'] = False
     else:
-        result = result.json()
         if result:
             ret['data'] = result
             ret['res'] = True
@@ -252,13 +252,21 @@ def put(consul_url=None, key=None, value=None, **kwargs):
     if not key:
         raise SaltInvocationError('Required argument "key" is missing.')
 
+    # Invalid to specified these together
+    conflicting_args = ['cas', 'release', 'acquire']
+    for _l1 in conflicting_args:
+        for _l2 in conflicting_args:
+            if _l1 in kwargs and _l2 in kwargs and _l1 != _l2:
+                raise SaltInvocationError('Using arguments `{0}` and `{1}`'
+                                          ' together is invalid.'.format(_l1, _l2))
+
     query_params = {}
 
     available_sessions = session_list(consul_url=consul_url, return_list=True)
     _current = get(consul_url=consul_url, key=key)
 
     if 'flags' in kwargs:
-        if not kwargs['flags'] >= 0 and not kwargs['flags'] <= 2**64:
+        if kwargs['flags'] >= 0 and kwargs['flags'] <= 2**64:
             query_params['flags'] = kwargs['flags']
 
     if 'cas' in kwargs:
@@ -280,8 +288,6 @@ def put(consul_url=None, key=None, value=None, **kwargs):
                               'CAS argument can not be used.'.format(key))
             ret['res'] = False
             return ret
-    else:
-        log.error('Key {0} does not exist. Skipping release.')
 
     if 'acquire' in kwargs:
         if kwargs['acquire'] not in available_sessions:
@@ -557,7 +563,7 @@ def agent_maintenance(consul_url=None, **kwargs):
     function = 'agent/maintenance'
     res = _query(consul_url=consul_url,
                  function=function,
-                 method='GET',
+                 method='PUT',
                  query_params=query_params)
     if res['res']:
         ret['res'] = True
@@ -608,11 +614,10 @@ def agent_join(consul_url=None, address=None, **kwargs):
                  query_params=query_params)
     if res['res']:
         ret['res'] = True
-        ret['message'] = ('Agent maintenance mode '
-                          '{0}ed.'.format(kwargs['enable']))
+        ret['message'] = 'Agent joined the cluster'
     else:
         ret['res'] = False
-        ret['message'] = 'Unable to change maintenance mode for agent.'
+        ret['message'] = 'Unable to join the cluster.'
     return ret
 
 
@@ -973,48 +978,62 @@ def agent_service_register(consul_url=None, **kwargs):
             ret['res'] = False
             return ret
 
-    if 'name' in kwargs:
-        data['Name'] = kwargs['name']
+    lc_kwargs = dict()
+    for k, v in salt.ext.six.iteritems(kwargs):
+        lc_kwargs[k.lower()] = v
+
+    if 'name' in lc_kwargs:
+        data['Name'] = lc_kwargs['name']
     else:
         raise SaltInvocationError('Required argument "name" is missing.')
 
-    if 'address' in kwargs:
-        data['Address'] = kwargs['address']
+    if 'address' in lc_kwargs:
+        data['Address'] = lc_kwargs['address']
 
-    if 'port' in kwargs:
-        data['Port'] = kwargs['port']
+    if 'port' in lc_kwargs:
+        data['Port'] = lc_kwargs['port']
 
-    if 'id' in kwargs:
-        data['ID'] = kwargs['id']
+    if 'id' in lc_kwargs:
+        data['ID'] = lc_kwargs['id']
 
-    if 'tags' in kwargs:
-        _tags = kwargs['tags']
+    if 'tags' in lc_kwargs:
+        _tags = lc_kwargs['tags']
         if not isinstance(_tags, list):
             _tags = [_tags]
         data['Tags'] = _tags
 
-    check_elements = ('check_script', 'check_http', 'check_ttl')
-    if True in [True for item in check_elements if item in kwargs]:
-        data['Check'] = {}
+    if 'enabletagoverride' in lc_kwargs:
+        data['EnableTagOverride'] = lc_kwargs['enabletagoverride']
 
-        if 'check_script' in kwargs:
-            if 'interval' not in kwargs:
+    if 'check' in lc_kwargs:
+        dd = dict()
+        for k, v in salt.ext.six.iteritems(lc_kwargs['check']):
+            dd[k.lower()] = v
+        interval_required = False
+        check_dd = dict()
+
+        if 'script' in dd:
+            interval_required = True
+            check_dd['Script'] = dd['script']
+        if 'http' in dd:
+            interval_required = True
+            check_dd['HTTP'] = dd['http']
+        if 'ttl' in dd:
+            check_dd['TTL'] = dd['ttl']
+        if 'interval' in dd:
+            check_dd['Interval'] = dd['interval']
+
+        if interval_required:
+            if 'Interval' not in check_dd:
                 ret['message'] = 'Required parameter "interval" is missing.'
                 ret['res'] = False
                 return ret
-            data['Check']['Script'] = kwargs['check_script']
-            data['Check']['Interval'] = kwargs['check_interval']
+        else:
+            if 'Interval' in check_dd:
+                del check_dd['Interval']  # not required, so ignore it
 
-        if 'check_ttl' in kwargs:
-            data['Check']['TTL'] = kwargs['check_ttl']
-
-        if 'check_http' in kwargs:
-            if 'interval' not in kwargs:
-                ret['message'] = 'Required parameter "interval" is missing.'
-                ret['res'] = False
-                return ret
-            data['Check']['HTTP'] = kwargs['check_http']
-            data['Check']['Interval'] = kwargs['check_interval']
+        if len(check_dd) > 0:
+            data['Check'] = check_dd  # if empty, ignore it
 
     function = 'agent/service/register'
     res = _query(consul_url=consul_url,
@@ -1199,7 +1218,7 @@ def session_create(consul_url=None, **kwargs):
         if str(_ttl).endswith('s'):
             _ttl = _ttl[:-1]
 
-        if not int(_ttl) >= 0 and not int(_ttl) <= 3600:
+        if int(_ttl) < 0 or int(_ttl) > 3600:
             ret['message'] = ('TTL must be ',
                               'between 0 and 3600.')
             ret['res'] = False
@@ -1959,6 +1978,8 @@ def acl_create(consul_url=None, **kwargs):
     Create a new ACL token.
 
     :param consul_url: The Consul server URL.
+    :param id: Unique identifier for the ACL to create
+               leave it blank to let consul server generate one
     :param name: Meaningful indicator of the ACL's purpose.
     :param type: Type is either client or management. A management
                  token is comparable to a root user and has the
@@ -1988,6 +2009,9 @@ def acl_create(consul_url=None, **kwargs):
         data['Name'] = kwargs['name']
     else:
         raise SaltInvocationError('Required argument "name" is missing.')
+
+    if 'id' in kwargs:
+        data['ID'] = kwargs['id']
 
     if 'type' in kwargs:
         data['Type'] = kwargs['type']
@@ -2107,7 +2131,7 @@ def acl_delete(consul_url=None, **kwargs):
         ret['res'] = False
         return ret
 
-    function = 'acl/delete/{0}'.format(kwargs['id'])
+    function = 'acl/destroy/{0}'.format(kwargs['id'])
     res = _query(consul_url=consul_url,
                  data=data,
                  method='PUT',

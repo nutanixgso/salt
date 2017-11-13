@@ -40,12 +40,14 @@ import logging
 import re
 import sys
 import shlex
+import os
 
 # Import salt libs
 import salt.utils
+import salt.utils.files
 
 # Import third party libs
-import salt.ext.six as six
+from salt.ext import six
 # pylint: disable=import-error
 from salt.ext.six.moves import range, zip  # pylint: disable=no-name-in-module,redefined-builtin
 try:
@@ -242,6 +244,26 @@ def __optimize_table(name, table, **connection_args):
     results = cur.fetchall()
     log.debug(results)
     return results
+
+
+def __password_column(**connection_args):
+    dbc = _connect(**connection_args)
+    if dbc is None:
+        return 'Password'
+    cur = dbc.cursor()
+    qry = ('SELECT column_name from information_schema.COLUMNS '
+           'WHERE table_schema=%(schema)s and table_name=%(table)s '
+           'and column_name=%(column)s')
+    args = {
+      'schema': 'mysql',
+      'table':  'user',
+      'column': 'Password'
+    }
+    _execute(cur, qry, args)
+    if int(cur.rowcount) > 0:
+        return 'Password'
+    else:
+        return 'authentication_string'
 
 
 def _connect(**kwargs):
@@ -600,19 +622,22 @@ def query(database, query, **connection_args):
     orig_conv = MySQLdb.converters.conversions
     conv_iter = iter(orig_conv)
     conv = dict(zip(conv_iter, [str] * len(orig_conv)))
+
     # some converters are lists, do not break theses
-    conv[FIELD_TYPE.BLOB] = [
-        (FLAG.BINARY, str),
-    ]
-    conv[FIELD_TYPE.STRING] = [
-        (FLAG.BINARY, str),
-    ]
-    conv[FIELD_TYPE.VAR_STRING] = [
-        (FLAG.BINARY, str),
-    ]
-    conv[FIELD_TYPE.VARCHAR] = [
-        (FLAG.BINARY, str),
-    ]
+    conv_mysqldb = {'MYSQLDB': True}
+    if conv_mysqldb.get(MySQLdb.__package__.upper()):
+        conv[FIELD_TYPE.BLOB] = [
+            (FLAG.BINARY, str),
+        ]
+        conv[FIELD_TYPE.STRING] = [
+            (FLAG.BINARY, str),
+        ]
+        conv[FIELD_TYPE.VAR_STRING] = [
+            (FLAG.BINARY, str),
+        ]
+        conv[FIELD_TYPE.VARCHAR] = [
+            (FLAG.BINARY, str),
+        ]
 
     connection_args.update({'connection_db': database, 'connection_conv': conv})
     dbc = _connect(**connection_args)
@@ -627,7 +652,7 @@ def query(database, query, **connection_args):
         err = 'MySQL Error {0}: {1}'.format(*exc)
         __context__['mysql.error'] = err
         log.error(err)
-        return {}
+        return False
     results = cur.fetchall()
     elapsed = (time.time() - start)
     if elapsed < 0.200:
@@ -654,6 +679,68 @@ def query(database, query, **connection_args):
     else:
         ret['rows affected'] = affected
         return ret
+
+
+def file_query(database, file_name, **connection_args):
+    '''
+    Run an arbitrary SQL query from the specified file and return the
+    the number of affected rows.
+
+    .. versionadded:: 2017.7.0
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' mysql.file_query mydb file_name=/tmp/sqlfile.sql
+
+    Return data:
+
+    .. code-block:: python
+
+        {'query time': {'human': '39.0ms', 'raw': '0.03899'}, 'rows affected': 1L}
+
+    '''
+    if os.path.exists(file_name):
+        with salt.utils.files.fopen(file_name, 'r') as ifile:
+            contents = ifile.read()
+    else:
+        log.error('File "{0}" does not exist'.format(file_name))
+        return False
+
+    query_string = ""
+    ret = {'rows returned': 0, 'columns': 0, 'results': 0, 'rows affected': 0, 'query time': {'raw': 0}}
+    for line in contents.splitlines():
+        if re.match(r'--', line):  # ignore sql comments
+            continue
+        if not re.search(r'[^-;]+;', line):  # keep appending lines that don't end in ;
+            query_string = query_string + line
+        else:
+            query_string = query_string + line  # append lines that end with ; and run query
+            query_result = query(database, query_string, **connection_args)
+            query_string = ""
+
+            if query_result is False:
+                # Fail out on error
+                return False
+
+            if 'query time' in query_result:
+                ret['query time']['raw'] += float(query_result['query time']['raw'])
+            if 'rows returned' in query_result:
+                ret['rows returned'] += query_result['rows returned']
+            if 'columns' in query_result:
+                ret['columns'] += query_result['columns']
+            if 'results' in query_result:
+                ret['results'] += query_result['results']
+            if 'rows affected' in query_result:
+                ret['rows affected'] += query_result['rows affected']
+    ret['query time']['human'] = str(round(float(ret['query time']['raw']), 2)) + 's'
+    ret['query time']['raw'] = round(float(ret['query time']['raw']), 5)
+
+    # Remove empty keys in ret
+    ret = dict((k, v) for k, v in six.iteritems(ret) if v)
+
+    return ret
 
 
 def status(**connection_args):
@@ -770,6 +857,8 @@ def free_slave(**connection_args):
         salt '*' mysql.free_slave
     '''
     slave_db = _connect(**connection_args)
+    if slave_db is None:
+        return ''
     slave_cur = slave_db.cursor(MySQLdb.cursors.DictCursor)
     slave_cur.execute('show slave status')
     slave_status = slave_cur.fetchone()
@@ -782,6 +871,8 @@ def free_slave(**connection_args):
         # servers here, and only overriding the host option in the connect
         # function.
         master_db = _connect(**master)
+        if master_db is None:
+            return ''
         master_cur = master_db.cursor()
         master_cur.execute('flush logs')
         master_db.close()
@@ -984,7 +1075,7 @@ def db_create(name, character_set=None, collate=None, **connection_args):
     cur = dbc.cursor()
     s_name = quote_identifier(name)
     # identifiers cannot be used as values
-    qry = 'CREATE DATABASE {0}'.format(s_name)
+    qry = 'CREATE DATABASE IF NOT EXISTS {0}'.format(s_name)
     args = {}
     if character_set is not None:
         qry += ' CHARACTER SET %(character_set)s'
@@ -1082,7 +1173,7 @@ def user_exists(user,
                 password_hash=None,
                 passwordless=False,
                 unix_socket=False,
-                password_column='Password',
+                password_column=None,
                 **connection_args):
     '''
     Checks if a user exists on the MySQL server. A login can be checked to see
@@ -1114,6 +1205,9 @@ def user_exists(user,
         dbc = _connect(**connection_args)
     if dbc is None:
         return False
+
+    if not password_column:
+        password_column = __password_column(**connection_args)
 
     cur = dbc.cursor()
     qry = ('SELECT User,Host FROM mysql.user WHERE User = %(user)s AND '
@@ -1185,7 +1279,7 @@ def user_create(user,
                 password_hash=None,
                 allow_passwordless=False,
                 unix_socket=False,
-                password_column='Password',
+                password_column=None,
                 **connection_args):
     '''
     Creates a MySQL user
@@ -1236,6 +1330,9 @@ def user_create(user,
     if dbc is None:
         return False
 
+    if not password_column:
+        password_column = __password_column(**connection_args)
+
     cur = dbc.cursor()
     qry = 'CREATE USER %(user)s@%(host)s'
     args = {}
@@ -1285,6 +1382,7 @@ def user_chpass(user,
                 password_hash=None,
                 allow_passwordless=False,
                 unix_socket=None,
+                password_column=None,
                 **connection_args):
     '''
     Change password for a MySQL user
@@ -1342,8 +1440,11 @@ def user_chpass(user,
     if dbc is None:
         return False
 
+    if not password_column:
+        password_column = __password_column(**connection_args)
+
     cur = dbc.cursor()
-    qry = ('UPDATE mysql.user SET password='
+    qry = ('UPDATE mysql.user SET ' + password_column + '='
            + password_sql +
            ' WHERE User=%(user)s AND Host = %(host)s;')
     args['user'] = user
@@ -1351,7 +1452,10 @@ def user_chpass(user,
     if salt.utils.is_true(allow_passwordless) and \
             salt.utils.is_true(unix_socket):
         if host == 'localhost':
-            qry += ' IDENTIFIED VIA unix_socket'
+            qry = ('UPDATE mysql.user SET ' + password_column + '='
+                   + password_sql + ', plugin=%(unix_socket)s' +
+                   ' WHERE User=%(user)s AND Host = %(host)s;')
+            args['unix_socket'] = 'unix_socket'
         else:
             log.error('Auth via unix_socket can be set only for host=localhost')
     try:
@@ -1688,7 +1792,7 @@ def grant_exists(grant,
             if grant_tokens['user'] == target_tokens['user'] and \
                     grant_tokens['database'] == target_tokens['database'] and \
                     grant_tokens['host'] == target_tokens['host'] and \
-                    set(grant_tokens['grant']) == set(target_tokens['grant']):
+                    set(grant_tokens['grant']) >= set(target_tokens['grant']):
                 return True
             else:
                 log.debug('grants mismatch \'{0}\'<>\'{1}\''.format(
@@ -1870,6 +1974,8 @@ def processlist(**connection_args):
     ret = []
 
     dbc = _connect(**connection_args)
+    if dbc is None:
+        return []
     cur = dbc.cursor()
     _execute(cur, 'SHOW FULL PROCESSLIST')
     hdr = [c[0] for c in cur.description]
@@ -1950,6 +2056,8 @@ def get_master_status(**connection_args):
     mod = sys._getframe().f_code.co_name
     log.debug('{0}<--'.format(mod))
     conn = _connect(**connection_args)
+    if conn is None:
+        return []
     rtnv = __do_query_into_hash(conn, "SHOW MASTER STATUS")
     conn.close()
 
@@ -2018,6 +2126,8 @@ def get_slave_status(**connection_args):
     mod = sys._getframe().f_code.co_name
     log.debug('{0}<--'.format(mod))
     conn = _connect(**connection_args)
+    if conn is None:
+        return []
     rtnv = __do_query_into_hash(conn, "SHOW SLAVE STATUS")
     conn.close()
 
@@ -2046,6 +2156,8 @@ def showvariables(**connection_args):
     mod = sys._getframe().f_code.co_name
     log.debug('{0}<--'.format(mod))
     conn = _connect(**connection_args)
+    if conn is None:
+        return []
     rtnv = __do_query_into_hash(conn, "SHOW VARIABLES")
     conn.close()
     if len(rtnv) == 0:
@@ -2072,6 +2184,8 @@ def showglobal(**connection_args):
     mod = sys._getframe().f_code.co_name
     log.debug('{0}<--'.format(mod))
     conn = _connect(**connection_args)
+    if conn is None:
+        return []
     rtnv = __do_query_into_hash(conn, "SHOW GLOBAL VARIABLES")
     conn.close()
     if len(rtnv) == 0:

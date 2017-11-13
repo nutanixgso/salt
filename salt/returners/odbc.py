@@ -149,7 +149,7 @@ __virtualname__ = 'odbc'
 
 def __virtual__():
     if not HAS_ODBC:
-        return False
+        return False, 'Could not import odbc returner; pyodbc is not installed.'
     return True
 
 
@@ -214,7 +214,7 @@ def returner(ret):
     _close_conn(conn)
 
 
-def save_load(jid, load):
+def save_load(jid, load, minions=None):
     '''
     Save the load to the specified jid id
     '''
@@ -224,6 +224,13 @@ def save_load(jid, load):
 
     cur.execute(sql, (jid, json.dumps(load)))
     _close_conn(conn)
+
+
+def save_minions(jid, minions, syndic_id=None):  # pylint: disable=unused-argument
+    '''
+    Included for API consistency
+    '''
+    pass
 
 
 def get_load(jid):

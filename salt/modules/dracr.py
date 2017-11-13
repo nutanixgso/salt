@@ -4,7 +4,6 @@ Manage Dell DRAC.
 
 .. versionadded:: 2015.8.2
 '''
-# pylint: disable=W0141
 
 # Import python libs
 from __future__ import absolute_import
@@ -14,10 +13,10 @@ import re
 
 # Import Salt libs
 from salt.exceptions import CommandExecutionError
-import salt.utils
+import salt.utils.path
 
 # Import 3rd-party libs
-import salt.ext.six as six
+from salt.ext import six
 from salt.ext.six.moves import range  # pylint: disable=import-error,no-name-in-module,redefined-builtin
 from salt.ext.six.moves import map
 
@@ -27,7 +26,7 @@ __proxyenabled__ = ['fx2']
 
 try:
     run_all = __salt__['cmd.run_all']
-except NameError:
+except (NameError, KeyError):
     import salt.modules.cmdmod
     __salt__ = {
         'cmd.run_all': salt.modules.cmdmod._run_all_quiet
@@ -35,7 +34,7 @@ except NameError:
 
 
 def __virtual__():
-    if salt.utils.which('racadm'):
+    if salt.utils.path.which('racadm'):
         return True
 
     return (False, 'The drac execution module cannot be loaded: racadm binary not in path.')
@@ -548,7 +547,7 @@ def create_user(username, password, permissions,
 
     .. code-block:: bash
 
-        salt dell dracr.create_user [USERNAME] [PASSWORD] [PRIVELEGES]
+        salt dell dracr.create_user [USERNAME] [PASSWORD] [PRIVILEGES]
         salt dell dracr.create_user diana secret login,test_alerts,clear_logs
 
     DRAC Privileges
@@ -616,7 +615,7 @@ def set_permissions(username, permissions,
 
     .. code-block:: bash
 
-        salt dell dracr.set_permissions [USERNAME] [PRIVELEGES]
+        salt dell dracr.set_permissions [USERNAME] [PRIVILEGES]
              [USER INDEX - optional]
         salt dell dracr.set_permissions diana login,test_alerts,clear_logs 4
 

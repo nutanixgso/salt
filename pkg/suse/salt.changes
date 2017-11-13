@@ -130,7 +130,7 @@ Wed Oct  7 19:15:54 UTC 2015 - mrueckert@suse.de
   2. the only part of the package which would really benefit from
      it would be the doc package. but given we only install the
      files via %doc, we can not use it for that either.
-- reenable completions on distros newer than sle11
+- re-enable completions on distros newer than sle11
 - do not use _datarootdir, use _datadir instead.
 
 -------------------------------------------------------------------
@@ -1321,7 +1321,7 @@ Thu Feb 14 06:43:08 UTC 2013 - aboe76@gmail.com
 -------------------------------------------------------------------
 Wed Jan 30 20:57:57 UTC 2013 - aboe76@gmail.com
 
-- Updated Suse Copyright in Spec-file
+- Updated SUSE Copyright in Spec-file
 
 -------------------------------------------------------------------
 Mon Jan 28 15:23:08 UTC 2013 - toddrme2178@gmail.com

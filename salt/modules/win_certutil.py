@@ -5,7 +5,7 @@ manager.
 
 .. code-block:: bash
 
-    salt '*' certutil.install salt://cert.cer "TrustedPublisher"
+    salt '*' certutil.add_store salt://cert.cer "TrustedPublisher"
 '''
 
 # Import Python Libs
@@ -14,7 +14,7 @@ import re
 import logging
 
 # Import Salt Libs
-import salt.utils
+import salt.utils.platform
 
 log = logging.getLogger(__name__)
 __virtualname__ = "certutil"
@@ -24,7 +24,7 @@ def __virtual__():
     '''
     Only work on Windows
     '''
-    if salt.utils.is_windows():
+    if salt.utils.platform.is_windows():
         return __virtualname__
     return False
 
@@ -36,10 +36,16 @@ def get_cert_serial(cert_file):
     cert_file
         The certificate file to find the serial for
 
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' certutil.get_cert_serial <certificate name>
     '''
-    cmd = "certutil.exe -verify {0}".format(cert_file)
+    cmd = "certutil.exe -silent -verify {0}".format(cert_file)
     out = __salt__['cmd.run'](cmd)
-    matches = re.search(r"Serial: (.*)", out)
+    # match serial number by paragraph to work with multiple languages
+    matches = re.search(r":\s*(\w*)\r\n\r\n", out)
     if matches is not None:
         return matches.groups()[0].strip()
     else:
@@ -53,10 +59,16 @@ def get_stored_cert_serials(store):
     store
         The store to get all the certificate serials from
 
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' certutil.get_stored_cert_serials <store>
     '''
     cmd = "certutil.exe -store {0}".format(store)
     out = __salt__['cmd.run'](cmd)
-    matches = re.findall(r"Serial Number: (.*)\r", out)
+    # match serial numbers by header position to work with multiple languages
+    matches = re.findall(r"={16}\r\n.*:\s*(\w*)\r\n", out)
     return matches
 
 
@@ -65,7 +77,7 @@ def add_store(source, store, saltenv='base'):
     Add the given cert into the given Certificate Store
 
     source
-        The source certficate file this can be in the form
+        The source certificate file this can be in the form
         salt://path/to/file
 
     store
@@ -91,7 +103,7 @@ def del_store(source, store, saltenv='base'):
     Delete the given cert into the given Certificate Store
 
     source
-        The source certficate file this can be in the form
+        The source certificate file this can be in the form
         salt://path/to/file
 
     store

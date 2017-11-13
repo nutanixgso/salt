@@ -40,13 +40,20 @@ passed in as a dict, or as a string to pull from pillars or minion config:
         boto_secgroup.present:
             - name: mysecgroup
             - description: My security group
+            - vpc_name: myvpc
             - rules:
                 - ip_protocol: tcp
                   from_port: 80
                   to_port: 80
                   cidr_ip:
-                    - 10.0.0.0/0
-                    - 192.168.0.0/0
+                    - 10.0.0.0/8
+                    - 192.168.0.0/16
+                - ip_protocol: tcp
+                  from_port: 8080
+                  to_port: 8090
+                  cidr_ip:
+                    - 10.0.0.0/8
+                    - 192.168.0.0/16
                 - ip_protocol: icmp
                   from_port: -1
                   to_port: -1
@@ -56,8 +63,8 @@ passed in as a dict, or as a string to pull from pillars or minion config:
                   from_port: -1
                   to_port: -1
                   cidr_ip:
-                    - 10.0.0.0/0
-                    - 192.168.0.0/0
+                    - 10.0.0.0/8
+                    - 192.168.0.0/16
             - tags:
                 SomeTag: 'My Tag Value'
                 SomeOtherTag: 'Other Tag Value'
@@ -95,6 +102,7 @@ from __future__ import absolute_import
 
 # Import Python libs
 import logging
+import pprint
 
 # Import salt libs
 import salt.utils.dictupdate as dictupdate
@@ -136,7 +144,7 @@ def present(
         The ID of the VPC to create the security group in, if any. Exclusive with vpc_name.
 
     vpc_name
-        The name of the VPC to create the security group in, if any. Exlusive with vpc_id.
+        The name of the VPC to create the security group in, if any. Exclusive with vpc_id.
 
         .. versionadded:: 2016.3.0
 
@@ -326,13 +334,15 @@ def _get_rule_changes(rules, _rules):
     # 2. determine if rule exists in existing security group rules
     for rule in rules:
         try:
-            ip_protocol = rule.get('ip_protocol')
+            ip_protocol = str(rule.get('ip_protocol'))
         except KeyError:
             raise SaltInvocationError('ip_protocol, to_port, and from_port are'
                                       ' required arguments for security group'
                                       ' rules.')
-        supported_protocols = ['tcp', 'udp', 'icmp', 'all', '-1']
-        if ip_protocol not in supported_protocols and (not ip_protocol.isdigit() or int(ip_protocol) > 255):
+        supported_protocols = ['tcp', '6', 6, 'udp', '17', 17, 'icmp', '1', 1,
+                               'all', '-1', -1]
+        if ip_protocol not in supported_protocols and (not
+              '{0}'.format(ip_protocol).isdigit() or int(ip_protocol) > 255):
             msg = ('Invalid ip_protocol {0} specified in security group rule.')
             raise SaltInvocationError(msg.format(ip_protocol))
         # For the 'all' case, we need to change the protocol name to '-1'.
@@ -416,7 +426,9 @@ def _rules_present(name, rules, vpc_id=None, vpc_name=None,
     to_delete, to_create = _get_rule_changes(rules, sg['rules'])
     if to_create or to_delete:
         if __opts__['test']:
-            msg = 'Security group {0} set to have rules modified.'.format(name)
+            msg = """Security group {0} set to have rules modified.
+            To be created: {1}
+            To be deleted: {2}""".format(name, pprint.pformat(to_create), pprint.pformat(to_delete))
             ret['comment'] = msg
             ret['result'] = None
             return ret
@@ -497,7 +509,9 @@ def _rules_egress_present(name, rules_egress, vpc_id=None, vpc_name=None,
     )
     if to_create_egress or to_delete_egress:
         if __opts__['test']:
-            msg = 'Security group {0} set to have rules modified.'.format(name)
+            msg = """Security group {0} set to have rules modified.
+            To be created: {1}
+            To be deleted: {2}""".format(name, pprint.pformat(to_create_egress), pprint.pformat(to_delete_egress))
             ret['comment'] = msg
             ret['result'] = None
             return ret
@@ -624,7 +638,7 @@ def _tags_present(name, tags, vpc_id=None, vpc_name=None, region=None,
         tags_to_update = {}
         tags_to_remove = []
         if sg.get('tags'):
-            for existing_tag in sg['tags'].keys():
+            for existing_tag in sg['tags']:
                 if existing_tag not in tags:
                     if existing_tag not in tags_to_remove:
                         tags_to_remove.append(existing_tag)

@@ -39,7 +39,7 @@ minion or master config. Avoid storing the config in pillars!
 
     cat /etc/salt/master.d/nacl.conf
     nacl.config:
-        key: None
+        key: 'cKEzd4kXsbeCE7/nLTIqXwnUiD1ulg4NoeeYcCFpd9k='
         keyfile: /root/.nacl
 
 When the key is defined in the master config you can use it from the nacl runner:
@@ -50,7 +50,7 @@ When the key is defined in the master config you can use it from the nacl runner
 
 Now you can create a pillar with protected data like:
 
-.. code-block:: yaml
+.. code-block:: jinja
 
     pillarexample:
         user: root
@@ -58,7 +58,7 @@ Now you can create a pillar with protected data like:
 
 Or do something interesting with grains like:
 
-.. code-block:: yaml
+.. code-block:: jinja
 
     salt-call nacl.enc minionname:dbrole
     AL24Z2C5OlkReer3DuQTFdrNLchLuz3NGIhGjZkLtKRYry/b/CksWM8O9yskLwH2AGVLoEXI5jAa
@@ -78,12 +78,37 @@ Or do something interesting with grains like:
         '{{ opts['id'] }}':
             - {{ role }}
         {%- endif %}
+
+Multi-line text items like certificates require a bit of extra work. You have to strip the new lines
+and replace them with '/n' characters. Certificates specifically require some leading white space when
+calling nacl.enc so that the '--' in the first line (commonly -----BEGIN CERTIFICATE-----) doesn't get
+interpreted as an argument to nacl.enc. For instance if you have a certificate file that lives in cert.crt:
+
+.. code-block:: bash
+
+    cert=$(cat cert.crt |awk '{printf "%s\\n",$0} END {print ""}'); salt-run nacl.enc "  $cert"
+
+Pillar data should look the same, even though the secret will be quite long. However, when calling
+multiline encrypted secrets from pillar in a state, use the following format to avoid issues with /n
+creating extra whitespace at the beginning of each line in the cert file:
+
+.. code-block:: jinja
+
+    secret.txt:
+        file.managed:
+            - template: jinja
+            - user: user
+            - group: group
+            - mode: 700
+            - contents: "{{- salt['pillar.get']('secret') }}"
+
+The '{{-' will tell jinja to strip the whitespace from the beginning of each of the new lines.
 '''
 
 from __future__ import absolute_import
 import base64
 import os
-import salt.utils
+import salt.utils.files
 import salt.syspaths
 
 
@@ -110,7 +135,7 @@ def _get_config(**kwargs):
     }
     config_key = '{0}.config'.format(__virtualname__)
     config.update(__salt__['config.get'](config_key, {}))
-    for k in set(config.keys()) & set(kwargs.keys()):
+    for k in set(config) & set(kwargs):
         config[k] = kwargs[k]
     return config
 
@@ -125,7 +150,7 @@ def _get_key(rstrip_newline=True, **kwargs):
     if not key and keyfile:
         if not os.path.isfile(keyfile):
             raise Exception('file not found: {0}'.format(keyfile))
-        with salt.utils.fopen(keyfile, 'rb') as keyf:
+        with salt.utils.files.fopen(keyfile, 'rb') as keyf:
             key = keyf.read()
     if key is None:
         raise Exception('no key found')
@@ -153,7 +178,7 @@ def keygen(keyfile=None):
     if keyfile:
         if os.path.isfile(keyfile):
             raise Exception('file already found: {0}'.format(keyfile))
-        with salt.utils.fopen(keyfile, 'w') as keyf:
+        with salt.utils.files.fopen(keyfile, 'w') as keyf:
             keyf.write(key)
             return 'saved: {0}'.format(keyfile)
     return key

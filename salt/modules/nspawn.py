@@ -35,6 +35,8 @@ import tempfile
 # Import Salt libs
 import salt.defaults.exitcodes
 import salt.utils
+import salt.utils.args
+import salt.utils.path
 import salt.utils.systemd
 from salt.exceptions import CommandExecutionError, SaltInvocationError
 from salt.ext import six
@@ -84,7 +86,7 @@ def _ensure_exists(wrapped):
             raise CommandExecutionError(
                 'Container \'{0}\' does not exist'.format(name)
             )
-        return wrapped(name, *args, **salt.utils.clean_kwargs(**kwargs))
+        return wrapped(name, *args, **salt.utils.args.clean_kwargs(**kwargs))
     return check_exists
 
 
@@ -146,7 +148,7 @@ def _bootstrap_arch(name, **kwargs):
     '''
     Bootstrap an Arch Linux container
     '''
-    if not salt.utils.which('pacstrap'):
+    if not salt.utils.path.which('pacstrap'):
         raise CommandExecutionError(
             'pacstrap not found, is the arch-install-scripts package '
             'installed?'
@@ -161,10 +163,24 @@ def _bootstrap_arch(name, **kwargs):
 
 def _bootstrap_debian(name, **kwargs):
     '''
-    Bootstrap a Debian Linux container (only unstable is currently supported)
+    Bootstrap a Debian Linux container
     '''
+    version = kwargs.get('version', False)
+    if not version:
+        if __grains__['os'].lower() == 'debian':
+            version = __grains__['osrelease']
+        else:
+            version = 'stable'
+
+    release_blacklist = ['hamm', 'slink', 'potato', 'woody', 'sarge', 'etch', 'lenny', 'squeeze', 'wheezy']
+    if version in release_blacklist:
+        raise CommandExecutionError(
+            'Unsupported Debian version "{0}". '
+            'Only "stable" or "jessie" and newer are supported'.format(version)
+        )
+
     dst = _make_container_root(name)
-    cmd = 'debootstrap --arch=amd64 unstable {0}'.format(dst)
+    cmd = 'debootstrap --arch=amd64 {0} {1}'.format(version, dst)
     ret = __salt__['cmd.run_all'](cmd, python_shell=False)
     if ret['retcode'] != 0:
         _build_failed(dst, name)
@@ -186,6 +202,24 @@ def _bootstrap_fedora(name, **kwargs):
     cmd = ('yum -y --releasever={0} --nogpg --installroot={1} '
            '--disablerepo="*" --enablerepo=fedora install systemd passwd yum '
            'fedora-release vim-minimal'.format(version, dst))
+    ret = __salt__['cmd.run_all'](cmd, python_shell=False)
+    if ret['retcode'] != 0:
+        _build_failed(dst, name)
+    return ret
+
+
+def _bootstrap_ubuntu(name, **kwargs):
+    '''
+    Bootstrap a Ubuntu Linux container
+    '''
+    version = kwargs.get('version', False)
+    if not version:
+        if __grains__['os'].lower() == 'ubuntu':
+            version = __grains__['oscodename']
+        else:
+            version = 'xenial'
+    dst = _make_container_root(name)
+    cmd = 'debootstrap --arch=amd64 {0} {1}'.format(version, dst)
     ret = __salt__['cmd.run_all'](cmd, python_shell=False)
     if ret['retcode'] != 0:
         _build_failed(dst, name)
@@ -654,7 +688,10 @@ def bootstrap_container(name, dist=None, version=None):
             'nspawn.bootstrap: no dist provided, defaulting to \'{0}\''
             .format(dist)
         )
-    return globals()['_bootstrap_{0}'.format(dist)](name, version=version)
+    try:
+        return globals()['_bootstrap_{0}'.format(dist)](name, version=version)
+    except KeyError:
+        raise CommandExecutionError('Unsupported distribution "{0}"'.format(dist))
 
 
 def _needs_install(name):
@@ -739,7 +776,7 @@ def bootstrap_salt(name,
             pub_key=pub_key, priv_key=priv_key)
         if needs_install or force_install or unconditional_install:
             if install:
-                rstr = __salt__['test.rand_str']()
+                rstr = __salt__['test.random_hash']()
                 configdir = '/tmp/.c_{0}'.format(rstr)
                 run(name,
                     'install -m 0700 -d {0}'.format(configdir),
@@ -926,10 +963,10 @@ def info(name, **kwargs):
         salt myminion nspawn.info arch1
         salt myminion nspawn.info arch1 force_start=False
     '''
-    kwargs = salt.utils.clean_kwargs(**kwargs)
+    kwargs = salt.utils.args.clean_kwargs(**kwargs)
     start_ = kwargs.pop('start', False)
     if kwargs:
-        salt.utils.invalid_kwargs(kwargs)
+        salt.utils.args.invalid_kwargs(kwargs)
 
     if not start_:
         _ensure_running(name)
@@ -1306,14 +1343,14 @@ def _pull_image(pull_type, image, name, **kwargs):
             'Unsupported image type \'{0}\''.format(pull_type)
         )
 
-    kwargs = salt.utils.clean_kwargs(**kwargs)
+    kwargs = salt.utils.args.clean_kwargs(**kwargs)
     bad_kwargs = dict(
-        [(x, y) for x, y in six.iteritems(salt.utils.clean_kwargs(**kwargs))
+        [(x, y) for x, y in six.iteritems(salt.utils.args.clean_kwargs(**kwargs))
          if x not in valid_kwargs]
     )
 
     if bad_kwargs:
-        salt.utils.invalid_kwargs(bad_kwargs)
+        salt.utils.args.invalid_kwargs(bad_kwargs)
 
     pull_opts = []
 

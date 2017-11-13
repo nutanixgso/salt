@@ -9,8 +9,8 @@ import time
 
 # Import salt libs
 import salt.utils
+import salt.utils.path
 import salt.utils.vt
-from salt.ext.six.moves import range  # pylint: disable=import-error,redefined-builtin
 
 __virtualname__ = 'sh'
 
@@ -22,7 +22,7 @@ def __virtual__():
     '''
     Only load if strace is installed
     '''
-    return __virtualname__ if salt.utils.which('strace') else False
+    return __virtualname__ if salt.utils.path.which('strace') else False
 
 
 def _get_shells():
@@ -41,7 +41,7 @@ def _get_shells():
     return __context__['sh.shells']
 
 
-def validate(config):
+def __validate__(config):
     '''
     Validate the beacon configuration
     '''
@@ -95,12 +95,12 @@ def beacon(config):
                      'tag': pid}
             if 'execve' in line:
                 comps = line.split('execve')[1].split('"')
-                for ind in range(len(comps)):
+                for ind, field in enumerate(comps):
                     if ind == 1:
-                        event['cmd'] = comps[ind]
+                        event['cmd'] = field
                         continue
                     if ind % 2 != 0:
-                        event['args'].append(comps[ind])
+                        event['args'].append(field)
                 event['user'] = __context__[pkey][pid]['user']
                 ret.append(event)
         if not __context__[pkey][pid]['vt'].isalive():

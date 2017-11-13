@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 '''
-Use the :doc:`Salt Event System </topics/event/index>` to fire events from the
+Use the :ref:`Salt Event System <events>` to fire events from the
 master to the minion and vice-versa.
 '''
 from __future__ import absolute_import
@@ -16,7 +16,7 @@ import salt.crypt
 import salt.utils.event
 import salt.payload
 import salt.transport
-import salt.ext.six as six
+from salt.ext import six
 
 __proxyenabled__ = ['*']
 log = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ def fire_master(data, tag, preload=None):
 
         salt '*' event.fire_master '{"data":"my event data"}' 'tag'
     '''
-    if __opts__.get('local', None):
+    if (__opts__.get('local', None) or __opts__.get('file_client', None) == 'local') and not __opts__.get('use_master_when_local', False):
         #  We can't send an event if we're in masterless mode
         log.warning('Local mode detected. Event with tag {0} will NOT be sent.'.format(tag))
         return False
@@ -63,6 +63,13 @@ def fire_master(data, tag, preload=None):
                     ip=salt.utils.ip_bracket(__opts__['interface']),
                     port=__opts__.get('ret_port', '4506')  # TODO, no fallback
                     )
+        masters = list()
+        ret = True
+        if 'master_uri_list' in __opts__:
+            for master_uri in __opts__['master_uri_list']:
+                masters.append(master_uri)
+        else:
+            masters.append(__opts__['master_uri'])
         auth = salt.crypt.SAuth(__opts__)
         load = {'id': __opts__['id'],
                 'tag': tag,
@@ -73,12 +80,13 @@ def fire_master(data, tag, preload=None):
         if isinstance(preload, dict):
             load.update(preload)
 
-        channel = salt.transport.Channel.factory(__opts__)
-        try:
-            channel.send(load)
-        except Exception:
-            pass
-        return True
+        for master in masters:
+            channel = salt.transport.Channel.factory(__opts__, master_uri=master)
+            try:
+                channel.send(load)
+            except Exception:
+                ret = False
+        return ret
     else:
         # Usually, we can send the event via the minion, which is faster
         # because it is already authenticated
@@ -226,4 +234,7 @@ def send(tag,
     if isinstance(data, collections.Mapping):
         data_dict.update(data)
 
-    return fire_master(data_dict, tag, preload=preload)
+    if __opts__.get('local') or __opts__.get('file_client') == 'local' or __opts__.get('master_type') == 'disable':
+        return fire(data_dict, tag)
+    else:
+        return fire_master(data_dict, tag, preload=preload)

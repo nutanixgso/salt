@@ -57,7 +57,7 @@ log = logging.getLogger(__name__)
 
 # Import salt libs
 from salt.exceptions import CommandExecutionError
-import salt.utils
+import salt.utils.files
 
 # Function alias to not shadow built-ins.
 __func_alias__ = {
@@ -88,7 +88,7 @@ def __virtual__():
     Virtual service only on systems using runit as init process (PID 1).
     Otherwise, use this module with the provider mechanism.
     '''
-    if __grains__['init'] == 'runit':
+    if __grains__.get('init') == 'runit':
         if __grains__['os'] == 'Void':
             add_svc_avail_path('/etc/sv')
         return __virtualname__
@@ -600,7 +600,7 @@ def enable(name, start=False, **kwargs):
         log.trace('need a temporary file {0}'.format(down_file))
         if not os.path.exists(down_file):
             try:
-                salt.utils.fopen(down_file, "w").close()
+                salt.utils.files.fopen(down_file, "w").close()  # pylint: disable=resource-leakage
             except IOError:
                 log.error('Unable to create file {0}'.format(down_file))
                 return False
@@ -647,7 +647,7 @@ def enable(name, start=False, **kwargs):
 def disable(name, stop=False, **kwargs):
     '''
     Don't start service ``name`` at boot
-    Returns ``True`` if operation is successfull
+    Returns ``True`` if operation is successful
 
     name
         the service's name
@@ -675,7 +675,7 @@ def disable(name, stop=False, **kwargs):
 
     if not os.path.exists(down_file):
         try:
-            salt.utils.fopen(down_file, "w").close()
+            salt.utils.files.fopen(down_file, "w").close()  # pylint: disable=resource-leakage
         except IOError:
             log.error('Unable to create file {0}'.format(down_file))
             return False
@@ -686,7 +686,7 @@ def disable(name, stop=False, **kwargs):
 def remove(name):
     '''
     Remove the service <name> from system.
-    Returns ``True`` if operation is successfull.
+    Returns ``True`` if operation is successful.
     The service will be also stopped.
 
     name

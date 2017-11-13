@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 '''
 Package support for Solaris
+
+.. important::
+    If you feel that Salt should be using this module to manage packages on a
+    minion, and it is using a different module (or gives an error similar to
+    *'pkg.install' is not available*), see :ref:`here
+    <module-provider-override>`.
 '''
 from __future__ import absolute_import
 
@@ -11,6 +17,7 @@ import logging
 
 # Import salt libs
 import salt.utils
+import salt.utils.files
 from salt.exceptions import CommandExecutionError, MinionError
 
 log = logging.getLogger(__name__)
@@ -23,7 +30,7 @@ def __virtual__():
     '''
     Set the virtual pkg module if the os is Solaris
     '''
-    if __grains__['os'] == 'Solaris' and float(__grains__['kernelrelease']) <= 5.10:
+    if __grains__['os_family'] == 'Solaris' and float(__grains__['kernelrelease']) <= 5.10:
         return __virtualname__
     return (False,
             'The solarispkg execution module failed to load: only available '
@@ -49,7 +56,7 @@ def _write_adminfile(kwargs):
     basedir = kwargs.get('basedir', 'default')
 
     # Make tempfile to hold the adminfile contents.
-    fd_, adminfile = salt.utils.mkstemp(prefix="salt-", close_fd=False)
+    fd_, adminfile = salt.utils.files.mkstemp(prefix="salt-", close_fd=False)
 
     # Write to file then close it.
     os.write(fd_, 'email={0}\n'.format(email))
@@ -451,7 +458,7 @@ def remove(name=None, pkgs=None, saltenv='base', **kwargs):
         basedir = kwargs.get('basedir', 'default')
 
         # Make tempfile to hold the adminfile contents.
-        fd_, adminfile = salt.utils.mkstemp(prefix="salt-", close_fd=False)
+        fd_, adminfile = salt.utils.files.mkstemp(prefix="salt-", close_fd=False)
 
         # Write to file then close it.
         os.write(fd_, 'email={0}\n'.format(email))

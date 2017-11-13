@@ -4,9 +4,13 @@ Simple and flexible YAML ext_pillar which can read pillar from within pillar.
 
 .. versionadded:: 2016.3.0
 
-This custom saltstack ``ext_pillar`` is inspired by
-`varstack <https://github.com/conversis/varstack>`_ but is heavily based on
-Jinja2 for maximum flexibility.
+`PillarStack <https://github.com/bbinet/pillarstack>`_ is a custom saltstack
+``ext_pillar`` which was inspired by `varstack
+<https://github.com/conversis/varstack>`_ but is heavily based on Jinja2 for
+maximum flexibility.
+
+Any issue should be reported to the upstream project at:
+https://github.com/bbinet/pillarstack/issues
 
 It supports the following features:
 
@@ -34,8 +38,8 @@ If you use an older Salt version or you want to override PillarStack with a
 more recent one, follow the installation procedure below.
 
 Installing the PillarStack ``ext_pillar`` is as simple as dropping the
-``stack.py`` file in the ``<extensions_modules>/pillar`` directory (no external
-python module required), given that ``extensions_modules`` is set in your
+``stack.py`` file in the ``<extension_modules>/pillar`` directory (no external
+python module required), given that ``extension_modules`` is set in your
 salt-master configuration, see:
 http://docs.saltstack.com/en/latest/ref/configuration/master.html#extension-modules
 
@@ -73,8 +77,8 @@ You can also provide a list of config files:
 Select config files through grains|pillar|opts matching
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can also opt for a much more flexible configuration: PillarStack allows to
-select the config files for the current minion based on matching values from
+You can also opt for a much more flexible configuration: PillarStack allows one
+to select the config files for the current minion based on matching values from
 either grains, or pillar, or opts objects.
 
 Here is an example of such a configuration, which should speak by itself:
@@ -101,7 +105,9 @@ are jinja2 templates which must render as a simple ordered list of ``yaml``
 files that will then be merged to build pillar data.
 
 The path of these ``yaml`` files must be relative to the directory of the
-PillarStack config file.
+PillarStack config file. These paths support unix style pathname pattern
+expansion through the
+`Python glob module <https://docs.python.org/2/library/glob.html>`.
 
 The following variables are available in jinja2 templating of PillarStack
 configuration files:
@@ -124,6 +130,7 @@ For example, you could have a PillarStack config file which looks like:
 
     $ cat /path/to/stack/config.cfg
     core.yml
+    common/*.yml
     osarchs/{{ __grains__['osarch'] }}.yml
     oscodenames/{{ __grains__['oscodename'] }}.yml
     {%- for role in pillar.get('roles', []) %}
@@ -139,6 +146,9 @@ And the whole directory structure could look like:
     /path/to/stack/
     ├── config.cfg
     ├── core.yml
+    ├── common/
+    │   ├── xxx.yml
+    │   └── yyy.yml
     ├── osarchs/
     │   ├── amd64.yml
     │   └── armhf.yml
@@ -160,6 +170,8 @@ amd64 platform running Debian Jessie, and which pillar ``roles`` is ``["db"]``,
 the following ``yaml`` files would be merged in order:
 
 - ``core.yml``
+- ``common/xxx.yml``
+- ``common/yyy.yml``
 - ``osarchs/amd64.yml``
 - ``oscodenames/jessie.yml``
 - ``roles/db.yml``
@@ -238,7 +250,7 @@ being merged recursively with the ``merge-last`` previous strategy.
 ~~~~~~~~~~~~~~~~~~~
 
 If the ``remove`` strategy is selected, then content of dict or list variables
-in ``stack`` are removed only if the correponding item is present in the
+in ``stack`` are removed only if the corresponding item is present in the
 ``yaml_data`` dict.
 This allows for removing items from previously defined data.
 
@@ -362,13 +374,20 @@ You can also select a custom merging strategy using a ``__`` object in a list:
 +----------------+-------------------------+-------------------------+
 '''
 
+# Import Python libs
 from __future__ import absolute_import
 import os
+import posixpath
 import logging
 from functools import partial
+from glob import glob
 
 import yaml
-from jinja2 import FileSystemLoader, Environment, TemplateNotFound
+from jinja2 import FileSystemLoader, Environment
+
+# Import Salt libs
+from salt.ext import six
+import salt.utils
 
 
 log = logging.getLogger(__name__)
@@ -376,7 +395,6 @@ strategies = ('overwrite', 'merge-first', 'merge-last', 'remove')
 
 
 def ext_pillar(minion_id, pillar, *args, **kwargs):
-    import salt.utils
     stack = {}
     stack_config_files = list(args)
     traverse = {
@@ -384,7 +402,7 @@ def ext_pillar(minion_id, pillar, *args, **kwargs):
         'grains': partial(salt.utils.traverse_dict_and_list, __grains__),
         'opts': partial(salt.utils.traverse_dict_and_list, __opts__),
         }
-    for matcher, matchs in kwargs.iteritems():
+    for matcher, matchs in six.iteritems(kwargs):
         t, matcher = matcher.split(':', 1)
         if t not in traverse:
             raise Exception('Unknown traverse option "{0}", '
@@ -402,28 +420,48 @@ def ext_pillar(minion_id, pillar, *args, **kwargs):
     return stack
 
 
+def _to_unix_slashes(path):
+    return posixpath.join(*path.split(os.sep))
+
+
+def _construct_unicode(loader, node):
+    return node.value
+
+
 def _process_stack_cfg(cfg, stack, minion_id, pillar):
+    log.debug('Config: {0}'.format(cfg))
     basedir, filename = os.path.split(cfg)
-    jenv = Environment(loader=FileSystemLoader(basedir))
+    yaml.SafeLoader.add_constructor("tag:yaml.org,2002:python/unicode", _construct_unicode)
+    jenv = Environment(loader=FileSystemLoader(basedir), extensions=['jinja2.ext.do', salt.utils.jinja.SerializerExtension])
     jenv.globals.update({
         "__opts__": __opts__,
         "__salt__": __salt__,
         "__grains__": __grains__,
+        "__stack__": {
+            'traverse': salt.utils.traverse_dict_and_list
+            },
         "minion_id": minion_id,
         "pillar": pillar,
         })
-    for path in jenv.get_template(filename).render(stack=stack).splitlines():
-        try:
-            obj = yaml.safe_load(jenv.get_template(path).render(stack=stack))
+    for item in _parse_stack_cfg(
+            jenv.get_template(filename).render(stack=stack)):
+        if not item.strip():
+            continue  # silently ignore whitespace or empty lines
+        paths = glob(os.path.join(basedir, item))
+        if not paths:
+            log.warning('Ignoring pillar stack template "{0}": can\'t find from '
+                     'root dir "{1}"'.format(item, basedir))
+            continue
+        for path in sorted(paths):
+            log.debug('YAML: basedir={0}, path={1}'.format(basedir, path))
+            # FileSystemLoader always expects unix-style paths
+            unix_path = _to_unix_slashes(os.path.relpath(path, basedir))
+            obj = yaml.safe_load(jenv.get_template(unix_path).render(stack=stack))
             if not isinstance(obj, dict):
                 log.info('Ignoring pillar stack template "{0}": Can\'t parse '
-                         'as a valid yaml dictionnary'.format(path))
+                         'as a valid yaml dictionary'.format(path))
                 continue
             stack = _merge_dict(stack, obj)
-        except TemplateNotFound:
-            log.info('Ignoring pillar stack template "{0}": can\'t find from '
-                     'root dir "{1}"'.format(path, basedir))
-            continue
     return stack
 
 
@@ -431,7 +469,7 @@ def _cleanup(obj):
     if obj:
         if isinstance(obj, dict):
             obj.pop('__', None)
-            for k, v in obj.iteritems():
+            for k, v in six.iteritems(obj):
                 obj[k] = _cleanup(v)
         elif isinstance(obj, list) and isinstance(obj[0], dict) \
                 and '__' in obj[0]:
@@ -447,7 +485,7 @@ def _merge_dict(stack, obj):
     if strategy == 'overwrite':
         return _cleanup(obj)
     else:
-        for k, v in obj.iteritems():
+        for k, v in six.iteritems(obj):
             if strategy == 'remove':
                 stack.pop(k, None)
                 continue
@@ -489,3 +527,16 @@ def _merge_list(stack, obj):
         return obj + stack
     else:
         return stack + obj
+
+
+def _parse_stack_cfg(content):
+    '''
+    Allow top level cfg to be YAML
+    '''
+    try:
+        obj = yaml.safe_load(content)
+        if isinstance(obj, list):
+            return obj
+    except Exception as e:
+        pass
+    return content.splitlines()

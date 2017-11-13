@@ -6,12 +6,12 @@ The 'dig' command line tool must be installed in order to use this module.
 from __future__ import absolute_import
 
 # Import salt libs
-import salt.utils
+import salt.utils.network
+import salt.utils.path
 
 # Import python libs
 import logging
 import re
-import socket
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def __virtual__():
     '''
     Only load module if dig binary is present
     '''
-    if salt.utils.which('dig'):
+    if salt.utils.path.which('dig'):
         return __virtualname__
     return (False, 'The dig execution module cannot be loaded: '
             'the dig binary is not in the path.')
@@ -39,19 +39,14 @@ def check_ip(addr):
         salt ns1 dig.check_ip 127.0.0.1
         salt ns1 dig.check_ip 1111:2222:3333:4444:5555:6666:7777:8888
     '''
+
     try:
         addr = addr.rsplit('/', 1)
     except AttributeError:
         # Non-string passed
         return False
 
-    # Test IPv4 first
-    try:
-        is_ipv4 = bool(socket.inet_pton(socket.AF_INET, addr[0]))
-    except socket.error:
-        # Not valid
-        is_ipv4 = False
-    if is_ipv4:
+    if salt.utils.network.is_ipv4(addr[0]):
         try:
             if 1 <= int(addr[1]) <= 32:
                 return True
@@ -62,13 +57,7 @@ def check_ip(addr):
             # No subnet notation used (i.e. just an IPv4 address)
             return True
 
-    # Test IPv6 next
-    try:
-        is_ipv6 = bool(socket.inet_pton(socket.AF_INET6, addr[0]))
-    except socket.error:
-        # Not valid
-        is_ipv6 = False
-    if is_ipv6:
+    if salt.utils.network.is_ipv6(addr[0]):
         try:
             if 8 <= int(addr[1]) <= 128:
                 return True

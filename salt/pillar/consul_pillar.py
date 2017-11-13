@@ -20,6 +20,8 @@ configuration file:
 
 All parameters are optional.
 
+The ``consul.token`` requires python-consul >= 0.4.7.
+
 If you have a multi-datacenter Consul cluster you can map your ``pillarenv``s
 to your data centers by providing a dictionary of mappings in ``consul.dc``
 field:
@@ -70,7 +72,7 @@ Optionally, a root may be specified.
       - consul: my_consul_config
 
     ext_pillar:
-      - consul: my_consul_config root=/salt
+      - consul: my_consul_config root=salt
 
 Using these configuration profiles, multiple consul sources may also be used:
 
@@ -80,14 +82,15 @@ Using these configuration profiles, multiple consul sources may also be used:
       - consul: my_consul_config
       - consul: my_other_consul_config
 
-Either the ``minion_id``, or the ``role`` grain  may be used in the ``root``
+Either the ``minion_id``, or the ``role``, or the ``environment`` grain  may be used in the ``root``
 path to expose minion-specific information stored in consul.
 
 .. code-block:: yaml
 
     ext_pillar:
-      - consul: my_consul_config root=/salt/%(minion_id)s
-      - consul: my_consul_config root=/salt/%(role)s
+      - consul: my_consul_config root=salt/%(minion_id)s
+      - consul: my_consul_config root=salt/%(role)s
+      - consul: my_consul_config root=salt/%(environment)s
 
 Minion-specific values may override shared values when the minion-specific root
 appears after the shared root:
@@ -95,33 +98,45 @@ appears after the shared root:
 .. code-block:: yaml
 
     ext_pillar:
-      - consul: my_consul_config root=/salt-shared
-      - consul: my_other_consul_config root=/salt-private/%(minion_id)s
+      - consul: my_consul_config root=salt-shared
+      - consul: my_other_consul_config root=salt-private/%(minion_id)s
 
-If using the ``role`` grain in the consul key path, be sure to define it using
+If using the ``role`` or ``environment`` grain in the consul key path, be sure to define it using
 `/etc/salt/grains`, or similar:
 
 .. code-block:: yaml
 
     role: my-minion-role
+    environment: dev
+
+It's possible to lock down where the pillar values are shared through minion
+targeting. Note that double quotes ``"`` are required around the target value
+and cannot be used inside the matching statement. See the section on Compound
+Matchers for more examples.
+
+.. code-block:: yaml
+
+    ext_pillar:
+      - consul: my_consul_config root=salt target="L@salt.example.com and G@osarch:x86_64"
 
 '''
 from __future__ import absolute_import
 
 # Import python libs
 import logging
-
 import re
-
 import yaml
 
 from salt.exceptions import CommandExecutionError
 from salt.utils.dictupdate import update as dict_merge
+import salt.utils.minions
+from salt.utils.yamlloader import SaltYamlSafeLoader
 
 # Import third party libs
 try:
     import consul
     HAS_CONSUL = True
+    CONSUL_VERSION = consul.__version__
 except ImportError:
     HAS_CONSUL = False
 
@@ -144,29 +159,49 @@ def ext_pillar(minion_id,
     '''
     Check consul for all data
     '''
-    comps = conf.split()
+    opts = {}
+    temp = conf
+    target_re = re.compile('target="(.*?)"')
+    match = target_re.search(temp)
+    if match:
+        opts['target'] = match.group(1)
+        temp = temp.replace(match.group(0), '')
+        checker = salt.utils.minions.CkMinions(__opts__)
+        minions = checker.check_minions(opts['target'], 'compound')
+        if minion_id not in minions:
+            return {}
 
-    profile = None
-    if comps[0]:
-        profile = comps[0]
-    client = get_conn(__opts__, profile)
+    root_re = re.compile('root=(\S*)')  # pylint: disable=W1401
+    match = root_re.search(temp)
+    if match:
+        opts['root'] = match.group(1)
+        temp = temp.replace(match.group(0), '')
+    else:
+        opts['root'] = ""
 
-    path = ''
-    if len(comps) > 1 and comps[1].startswith('root='):
-        path = comps[1].replace('root=', '')
+    profile_re = re.compile('(?:profile=)?(\S+)')  # pylint: disable=W1401
+    match = profile_re.search(temp)
+    if match:
+        opts['profile'] = match.group(1)
+        temp = temp.replace(match.group(0), '')
+    else:
+        opts['profile'] = None
 
-    role = __salt__['grains.get']('role')
+    client = get_conn(__opts__, opts['profile'])
+
+    role = __salt__['grains.get']('role', None)
+    environment = __salt__['grains.get']('environment', None)
     # put the minion's ID in the path if necessary
-    path %= {
+    opts['root'] %= {
         'minion_id': minion_id,
-        'role': role
+        'role': role,
+        'environment': environment
     }
 
     try:
-        pillar = fetch_tree(client, path)
+        pillar = fetch_tree(client, opts['root'])
     except KeyError:
-        log.error('No such key in consul profile {0}: {1}'
-                  .format(profile, path))
+        log.error('No such key in consul profile %s: %s', opts['profile'], opts['root'])
         pillar = {}
 
     return pillar
@@ -195,8 +230,8 @@ def fetch_tree(client, path):
         return ret
     for item in reversed(items):
         key = re.sub(r'^' + path + '/?', '', item['Key'])
-        if key != "":
-            log.debug('key/path - {0}: {1}'.format(path, key))
+        if key != '':
+            log.debug('key/path - %s: %s', path, key)
             log.debug('has_children? %r', format(has_children.search(key)))
         if has_children.search(key) is None:
             ret = pillar_format(ret, key.split('/'), item['Value'])
@@ -217,7 +252,10 @@ def pillar_format(ret, keys, value):
     # If value is not None then it's a string
     # Use YAML to parse the data
     # YAML strips whitespaces unless they're surrounded by quotes
-    pillar_value = yaml.load(value)
+    pillar_value = yaml.load(
+        value,
+        Loader=SaltYamlSafeLoader
+    )
 
     keyvalue = keys.pop()
     pil = {keyvalue: pillar_value}
@@ -247,16 +285,18 @@ def get_conn(opts, profile):
         conf = opts_merged
 
     params = {}
-    for key in ('host', 'port', 'token', 'scheme', 'consistency', 'dc', 'verify'):
-        prefixed_key = 'consul.{key}'.format(key=key)
-        if prefixed_key in conf:
-            params[key] = conf[prefixed_key]
+    for key in conf:
+        if key.startswith('consul.'):
+            params[key.split('.')[1]] = conf[key]
 
     if 'dc' in params:
         pillarenv = opts_merged.get('pillarenv') or 'base'
         params['dc'] = _resolve_datacenter(params['dc'], pillarenv)
 
     if HAS_CONSUL:
+        # Sanity check. ACL Tokens are supported on python-consul 0.4.7 onwards only.
+        if CONSUL_VERSION < '0.4.7' and params.get('target'):
+            params.pop('target')
         return consul.Consul(**params)
     else:
         raise CommandExecutionError(
@@ -279,20 +319,16 @@ def _resolve_datacenter(dc, pillarenv):
     If none patterns matched return ``None`` which meanse us datacenter of
     conencted Consul agent.
     '''
-    log.debug("Resolving Consul datacenter based on: {dc}".format(dc=dc))
+    log.debug('Resolving Consul datacenter based on: %s', dc)
 
     try:
         mappings = dc.items()  # is it a dict?
     except AttributeError:
-        log.debug('Using pre-defined DC: {dc!r}'.format(dc=dc))
+        log.debug('Using pre-defined DC: \'%s\'', dc)
         return dc
 
-    log.debug(
-        'Selecting DC based on pillarenv using {num} pattern(s)'.format(
-            num=len(mappings)
-        )
-    )
-    log.debug('Pillarenv set to {env!r}'.format(env=pillarenv))
+    log.debug('Selecting DC based on pillarenv using %d pattern(s)', len(mappings))
+    log.debug('Pillarenv set to \'%s\'', pillarenv)
 
     # sort in reverse based on pattern length
     # but use alphabetic order within groups of patterns of same length
@@ -301,13 +337,12 @@ def _resolve_datacenter(dc, pillarenv):
     for pattern, target in sorted_mappings:
         match = re.match(pattern, pillarenv)
         if match:
-            log.debug('Matched pattern: {pattern!r}'.format(pattern=pattern))
+            log.debug('Matched pattern: \'%s\'', pattern)
             result = target.format(**match.groupdict())
-            log.debug('Resolved datacenter: {result!r}'.format(result=result))
+            log.debug('Resolved datacenter: \'%s\'', result)
             return result
 
     log.debug(
-        'None of following patterns matched pillarenv={env}: {lst}'.format(
-            env=pillarenv, lst=', '.join(repr(x) for x in mappings)
-        )
+        'None of following patterns matched pillarenv=%s: %s',
+        pillarenv, ', '.join(repr(x) for x in mappings)
     )

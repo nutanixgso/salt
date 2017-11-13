@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 '''
-Install pkg, dmg and .app applications on Mac OS X minions.
+Install pkg, dmg and .app applications on macOS minions.
 
 '''
 
@@ -16,8 +16,8 @@ try:
 except ImportError:
     HAS_DEPS = False
 
-# Import salt libs
-import salt.utils
+# Import Salt libs
+import salt.utils.platform
 
 log = logging.getLogger(__name__)
 __virtualname__ = 'macpackage'
@@ -35,7 +35,7 @@ def __virtual__():
     '''
     Only work on Mac OS
     '''
-    if salt.utils.is_darwin() and _quote is not None:
+    if salt.utils.platform.is_darwin() and _quote is not None:
         return __virtualname__
     return False
 
@@ -44,24 +44,26 @@ def install(pkg, target='LocalSystem', store=False, allow_untrusted=False):
     '''
     Install a pkg file
 
+    Args:
+        pkg (str): The package to install
+        target (str): The target in which to install the package to
+        store (bool): Should the package be installed as if it was from the
+                      store?
+        allow_untrusted (bool): Allow the installation of untrusted packages?
+
+    Returns:
+        dict: A dictionary containing the results of the installation
+
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' macpackage.install test.pkg
-
-    target
-        The target in which to install the package to
-
-    store
-        Should the package be installed as if it was from the store?
-
-    allow_untrusted
-        Allow the installation of untrusted packages?
-
-
     '''
-    pkg = _quote(pkg)
+    if '*.' not in pkg:
+        # If we use wildcards, we cannot use quotes
+        pkg = _quote(pkg)
+
     target = _quote(target)
 
     cmd = 'installer -pkg {0} -target {1}'.format(pkg, target)
@@ -81,24 +83,22 @@ def install(pkg, target='LocalSystem', store=False, allow_untrusted=False):
 
 def install_app(app, target='/Applications/'):
     '''
-    Install an app file
+    Install an app file by moving it into the specified Applications directory
+
+    Args:
+        app (str): The location of the .app file
+        target (str): The target in which to install the package to
+                      Default is ''/Applications/''
+
+    Returns:
+        str: The results of the rsync command
 
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' macpackage.install_app /tmp/tmp.app /Applications/
-
-    app
-        The location of the .app file
-
-    target
-        The target in which to install the package to
-
-
     '''
-    app = _quote(app)
-    target = _quote(target)
 
     if not target[-4:] == '.app':
         if app[-1:] == '/':
@@ -111,24 +111,25 @@ def install_app(app, target='/Applications/'):
     if not app[-1] == '/':
         app += '/'
 
-    cmd = 'rsync -a --no-compress --delete {0} {1}'.format(app, target)
+    cmd = 'rsync -a --delete "{0}" "{1}"'.format(app, target)
     return __salt__['cmd.run'](cmd)
 
 
 def uninstall_app(app):
     '''
-    Uninstall an app file
+    Uninstall an app file by removing it from the Applications directory
+
+    Args:
+        app (str): The location of the .app file
+
+    Returns:
+        bool: True if successful, otherwise False
 
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' macpackage.uninstall_app /Applications/app.app
-
-    app
-        The location of the .app file
-
-
     '''
 
     return __salt__['file.remove'](app)
@@ -139,8 +140,18 @@ def mount(dmg):
     Attempt to mount a dmg file to a temporary location and return the
     location of the pkg file inside
 
-    dmg
-        The location of the dmg file to mount
+    Args:
+        dmg (str): The location of the dmg file to mount
+
+    Returns:
+        tuple: Tuple containing the results of the command along with the mount
+               point
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' macpackage.mount /tmp/software.dmg
     '''
 
     temp_dir = __salt__['temp.dir'](prefix='dmg-')
@@ -154,8 +165,17 @@ def unmount(mountpoint):
     '''
     Attempt to unmount a dmg file from a temporary location
 
-    mountpoint
-        The location of the mount point
+    Args:
+        mountpoint (str): The location of the mount point
+
+    Returns:
+        str: The results of the hdutil detach command
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' macpackage.unmount /dev/disk2
     '''
 
     cmd = 'hdiutil detach "{0}"'.format(mountpoint)
@@ -167,6 +187,14 @@ def installed_pkgs():
     '''
     Return the list of installed packages on the machine
 
+    Returns:
+        list: List of installed packages
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' macpackage.installed_pkgs
     '''
 
     cmd = 'pkgutil --pkgs'
@@ -176,12 +204,19 @@ def installed_pkgs():
 
 def get_pkg_id(pkg):
     '''
-    Attempt to get the package id from a .pkg file
+    Attempt to get the package ID from a .pkg file
 
-    Returns all of the package ids if the pkg file contains multiple
+    Args:
+        pkg (str): The location of the pkg file
 
-    pkg
-        The location of the pkg file
+    Returns:
+        list: List of all of the package IDs
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' macpackage.get_pkg_id /tmp/test.pkg
     '''
     pkg = _quote(pkg)
     package_ids = []
@@ -217,12 +252,19 @@ def get_pkg_id(pkg):
 
 def get_mpkg_ids(mpkg):
     '''
-    Attempt to get the package ids from a mounted .mpkg file
+    Attempt to get the package IDs from a mounted .mpkg file
 
-    Returns all of the package ids if the pkg file contains multiple
+    Args:
+        mpkg (str): The location of the mounted mpkg file
 
-    pkg
-        The location of the mounted mpkg file
+    Returns:
+        list: List of package IDs
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' macpackage.get_mpkg_ids /dev/disk2
     '''
     mpkg = _quote(mpkg)
     package_infos = []

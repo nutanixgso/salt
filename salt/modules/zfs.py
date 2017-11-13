@@ -11,7 +11,8 @@ from __future__ import absolute_import
 import logging
 
 # Import Salt libs
-import salt.utils
+import salt.utils.args
+import salt.utils.path
 import salt.modules.cmdmod
 import salt.utils.decorators as decorators
 from salt.utils.odict import OrderedDict
@@ -30,7 +31,7 @@ def _check_zfs():
     Looks to see if zfs is present on the system.
     '''
     # Get the path to the zfs binary.
-    return salt.utils.which('zfs')
+    return salt.utils.path.which('zfs')
 
 
 @decorators.memoize
@@ -39,7 +40,7 @@ def _check_features():
     Looks to see if zpool-features is available
     '''
     # get man location
-    man = salt.utils.which('man')
+    man = salt.utils.path.which('man')
     if not man:
         return False
 
@@ -62,13 +63,13 @@ def __virtual__():
     if on_freebsd:
         cmd = 'kldstat -q -m zfs'
     elif on_linux:
-        modinfo = salt.utils.which('modinfo')
+        modinfo = salt.utils.path.which('modinfo')
         if modinfo:
             cmd = '{0} zfs'.format(modinfo)
         else:
             cmd = 'ls /sys/module/zfs'
     elif on_solaris:
-        # not using salt.utils.which('zfs') to keep compatible with others
+        # not using salt.utils.path.which('zfs') to keep compatible with others
         cmd = 'which zfs'
 
     if cmd and salt.modules.cmdmod.retcode(
@@ -162,7 +163,7 @@ def create(name, **kwargs):
     # create "-o property=value" pairs
     if properties:
         optlist = []
-        for prop in properties.keys():
+        for prop in properties:
             if isinstance(properties[prop], bool):  # salt breaks the on/off/yes/no properties :(
                 properties[prop] = 'on' if properties[prop] else 'off'
 
@@ -320,7 +321,7 @@ def list_(name=None, **kwargs):
     depth : int
         limit recursion to depth
     properties : string
-        comma-seperated list of properties to list, the name property will always be added
+        comma-separated list of properties to list, the name property will always be added
     type : string
         comma-separated list of types to display, where type is one of
         filesystem, snapshot, volume, bookmark, or all.
@@ -685,7 +686,7 @@ def clone(name_a, name_b, **kwargs):
     # create "-o property=value" pairs
     if properties:
         optlist = []
-        for prop in properties.keys():
+        for prop in properties:
             if isinstance(properties[prop], bool):  # salt breaks the on/off/yes/no properties :(
                 properties[prop] = 'on' if properties[prop] else 'off'
             optlist.append('-o {0}={1}'.format(prop, properties[prop]))
@@ -885,7 +886,7 @@ def hold(tag, *snapshot, **kwargs):
 
     .. note::
 
-        A comma-seperated list can be provided for the tag parameter to hold multiple tags.
+        A comma-separated list can be provided for the tag parameter to hold multiple tags.
 
     CLI Example:
 
@@ -963,7 +964,7 @@ def release(tag, *snapshot, **kwargs):
 
     .. note::
 
-        A comma-seperated list can be provided for the tag parameter to release multiple tags.
+        A comma-separated list can be provided for the tag parameter to release multiple tags.
 
     CLI Example:
 
@@ -1063,7 +1064,7 @@ def snapshot(*snapshot, **kwargs):
     # create "-o property=value" pairs
     if properties:
         optlist = []
-        for prop in properties.keys():
+        for prop in properties:
             if isinstance(properties[prop], bool):  # salt breaks the on/off/yes/no properties :(
                 properties[prop] = 'on' if properties[prop] else 'off'
             optlist.append('-o {0}={1}'.format(prop, properties[prop]))
@@ -1142,7 +1143,7 @@ def set(*dataset, **kwargs):
         ret['error'] = 'one or more snapshots must be specified'
 
     # clean kwargs
-    properties = salt.utils.clean_kwargs(**kwargs)
+    properties = salt.utils.args.clean_kwargs(**kwargs)
     if len(properties) < 1:
         ret['error'] = '{0}one or more properties must be specified'.format(
             '{0},\n'.format(ret['error']) if 'error' in ret else ''
@@ -1153,7 +1154,7 @@ def set(*dataset, **kwargs):
 
     # for better error handling we don't do one big set command
     for ds in dataset:
-        for prop in properties.keys():
+        for prop in properties:
 
             if isinstance(properties[prop], bool):  # salt breaks the on/off/yes/no properties :(
                 properties[prop] = 'on' if properties[prop] else 'off'
@@ -1192,7 +1193,7 @@ def get(*dataset, **kwargs):
     depth : int
         recursively list children to depth
     fields : string
-        comma-seperated list of fields to include, the name and property field will always be added
+        comma-separated list of fields to include, the name and property field will always be added
     type : string
         comma-separated list of types to display, where type is one of
         filesystem, snapshot, volume, bookmark, or all.

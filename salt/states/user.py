@@ -23,15 +23,15 @@ as either absent or present
     testuser:
       user.absent
 '''
-
-# Import python libs
+# Import Python libs
 from __future__ import absolute_import
 import os
 import logging
 
-# Import salt libs
+# Import Salt libs
 import salt.utils
-from salt.utils.locales import sdecode
+import salt.utils.platform
+from salt.utils.locales import sdecode, sdecode_if_string
 
 # Import 3rd-party libs
 from salt.ext.six import string_types, iteritems
@@ -72,7 +72,7 @@ def _changes(name,
              maxdays=999999,
              inactdays=0,
              warndays=7,
-             expire=-1,
+             expire=None,
              win_homedrive=None,
              win_profile=None,
              win_logonscript=None,
@@ -126,12 +126,14 @@ def _changes(name,
     if shell and lusr['shell'] != shell:
         change['shell'] = shell
     if 'shadow.info' in __salt__ and 'shadow.default_hash' in __salt__:
-        if password:
+        if password and not empty_password:
             default_hash = __salt__['shadow.default_hash']()
             if lshad['passwd'] == default_hash \
                     or lshad['passwd'] != default_hash and enforce_password:
                 if lshad['passwd'] != password:
                     change['passwd'] = password
+        if empty_password and lshad['passwd'] != '':
+            change['empty_password'] = True
         if date and date is not 0 and lshad['lstchg'] != date:
             change['date'] = date
         if mindays and mindays is not 0 and lshad['min'] != mindays:
@@ -142,13 +144,15 @@ def _changes(name,
             change['inactdays'] = inactdays
         if warndays and warndays is not 7 and lshad['warn'] != warndays:
             change['warndays'] = warndays
-        if expire and expire is not -1 and lshad['expire'] != expire:
+        if expire and lshad['expire'] != expire:
             change['expire'] = expire
+    elif 'shadow.info' in __salt__ and salt.utils.platform.is_windows():
+        if expire and expire is not -1 and salt.utils.date_format(lshad['expire']) != salt.utils.date_format(expire):
+            change['expire'] = expire
+
     # GECOS fields
-    if isinstance(fullname, string_types):
-        fullname = sdecode(fullname)
-    if isinstance(lusr['fullname'], string_types):
-        lusr['fullname'] = sdecode(lusr['fullname'])
+    fullname = sdecode_if_string(fullname)
+    lusr['fullname'] = sdecode_if_string(lusr['fullname'])
     if fullname is not None and lusr['fullname'] != fullname:
         change['fullname'] = fullname
     if win_homedrive and lusr['homedrive'] != win_homedrive:
@@ -163,17 +167,23 @@ def _changes(name,
     # MacOS doesn't have full GECOS support, so check for the "ch" functions
     # and ignore these parameters if these functions do not exist.
     if 'user.chroomnumber' in __salt__ \
-            and roomnumber is not None \
-            and lusr['roomnumber'] != roomnumber:
-        change['roomnumber'] = roomnumber
+            and roomnumber is not None:
+        roomnumber = sdecode_if_string(roomnumber)
+        lusr['roomnumber'] = sdecode_if_string(lusr['roomnumber'])
+        if lusr['roomnumber'] != roomnumber:
+            change['roomnumber'] = roomnumber
     if 'user.chworkphone' in __salt__ \
-            and workphone is not None \
-            and lusr['workphone'] != workphone:
-        change['workphone'] = workphone
+            and workphone is not None:
+        workphone = sdecode_if_string(workphone)
+        lusr['workphone'] = sdecode_if_string(lusr['workphone'])
+        if lusr['workphone'] != workphone:
+            change['workphone'] = workphone
     if 'user.chhomephone' in __salt__ \
-            and homephone is not None \
-            and lusr['homephone'] != homephone:
-        change['homephone'] = homephone
+            and homephone is not None:
+        homephone = sdecode_if_string(homephone)
+        lusr['homephone'] = sdecode_if_string(lusr['homephone'])
+        if lusr['homephone'] != homephone:
+            change['homephone'] = homephone
     # OpenBSD/FreeBSD login class
     if __grains__['kernel'] in ('OpenBSD', 'FreeBSD'):
         if loginclass:
@@ -213,7 +223,8 @@ def present(name,
             win_homedrive=None,
             win_profile=None,
             win_logonscript=None,
-            win_description=None):
+            win_description=None,
+            nologinit=False):
     '''
     Ensure that the named user is present with the specified properties
 
@@ -256,10 +267,22 @@ def present(name,
         This also the location of the home directory to create if createhome is
         set to True.
 
-    createhome
-        If False, the home directory will not be created if it doesn't exist.
-        Please note that directories leading up to the home directory
-        will NOT be created, Default is ``True``.
+    createhome : True
+        If set to ``False``, the home directory will not be created if it
+        doesn't already exist.
+
+        .. warning::
+            Not supported on Windows or Mac OS.
+
+            Additionally, parent directories will *not* be created. The parent
+            directory for ``home`` must already exist.
+
+    nologinit : False
+        If set to ``True``, it will not add the user to lastlog and faillog
+        databases.
+
+        .. note::
+            Not supported on Windows or Mac OS.
 
     password
         A password hash to set for the user. This field is only supported on
@@ -316,6 +339,7 @@ def present(name,
 
     homephone
         The user's home phone number (not supported in MacOS)
+        If GECOS field contains more than 3 commas, this field will have the rest of 'em
 
     .. versionchanged:: 2014.7.0
        Shadow attribute support added.
@@ -372,10 +396,8 @@ def present(name,
 
         .. versionchanged:: 2015.8.0
     '''
-
     # First check if a password is set. If password is set, check if
     # hash_password is True, then hash it.
-
     if password and hash_password:
         log.debug('Hashing a clear text password')
         password = __salt__['shadow.gen_password'](password)
@@ -389,6 +411,10 @@ def present(name,
     if homephone is not None:
         homephone = sdecode(homephone)
 
+    # createhome not supported on Windows or Mac
+    if __grains__['kernel'] in ('Darwin', 'Windows'):
+        createhome = False
+
     ret = {'name': name,
            'changes': {},
            'result': True,
@@ -396,7 +422,7 @@ def present(name,
 
     # the comma is used to separate field in GECOS, thus resulting into
     # salt adding the end of fullname each time this function is called
-    for gecos_field in ['fullname', 'roomnumber', 'workphone', 'homephone']:
+    for gecos_field in ['fullname', 'roomnumber', 'workphone']:
         if isinstance(gecos_field, string_types) and ',' in gecos_field:
             ret['comment'] = "Unsupported char ',' in {0}".format(gecos_field)
             ret['result'] = False
@@ -429,9 +455,6 @@ def present(name,
 
     if gid_from_name:
         gid = __salt__['file.group_to_gid'](name)
-
-    if empty_password:
-        __salt__['shadow.del_password'](name)
 
     changes = _changes(name,
                        uid,
@@ -467,9 +490,11 @@ def present(name,
             ret['comment'] = ('The following user attributes are set to be '
                               'changed:\n')
             for key, val in iteritems(changes):
-                if key == 'password':
+                if key == 'passwd':
                     val = 'XXX-REDACTED-XXX'
-                ret['comment'] += '{0}: {1}\n'.format(key, val)
+                elif key == 'group' and not remove_groups:
+                    key = 'ensure groups'
+                ret['comment'] += u'{0}: {1}\n'.format(key, val)
             return ret
         # The user is present
         if 'shadow.info' in __salt__:
@@ -481,21 +506,27 @@ def present(name,
             if key == 'passwd' and not empty_password:
                 __salt__['shadow.set_password'](name, password)
                 continue
+            if key == 'passwd' and empty_password:
+                log.warning("No password will be set when empty_password=True")
+                continue
+            if key == 'empty_password' and val:
+                __salt__['shadow.del_password'](name)
+                continue
             if key == 'date':
                 __salt__['shadow.set_date'](name, date)
                 continue
             # run chhome once to avoid any possible bad side-effect
             if key == 'home' and 'homeDoesNotExist' not in changes:
-                if __grains__['kernel'] == 'Darwin':
+                if __grains__['kernel'] in ('Darwin', 'Windows'):
                     __salt__['user.chhome'](name, val)
                 else:
-                    __salt__['user.chhome'](name, val, False)
+                    __salt__['user.chhome'](name, val, persist=False)
                 continue
             if key == 'homeDoesNotExist':
-                if __grains__['kernel'] == 'Darwin':
+                if __grains__['kernel'] in ('Darwin', 'Windows'):
                     __salt__['user.chhome'](name, val)
                 else:
-                    __salt__['user.chhome'](name, val, True)
+                    __salt__['user.chhome'](name, val, persist=True)
                 if not os.path.isdir(val):
                     __salt__['file.mkdir'](val, pre['uid'], pre['gid'], 0o755)
                 continue
@@ -546,7 +577,10 @@ def present(name,
         if 'shadow.info' in __salt__:
             for key in spost:
                 if lshad[key] != spost[key]:
-                    ret['changes'][key] = spost[key]
+                    if key == 'passwd':
+                        ret['changes'][key] = 'XXX-REDACTED-XXX'
+                    else:
+                        ret['changes'][key] = spost[key]
         if __grains__['kernel'] in ('OpenBSD', 'FreeBSD') and lcpost != lcpre:
             ret['changes']['loginclass'] = lcpost
         if ret['changes']:
@@ -599,7 +633,7 @@ def present(name,
 
         # Setup params specific to Linux and Windows to be passed to the
         # add.user function
-        if not salt.utils.is_windows():
+        if not salt.utils.platform.is_windows():
             params = {'name': name,
                       'uid': uid,
                       'gid': gid,
@@ -613,6 +647,7 @@ def present(name,
                       'workphone': workphone,
                       'homephone': homephone,
                       'createhome': createhome,
+                      'nologinit': nologinit,
                       'loginclass': loginclass}
         else:
             params = ({'name': name,
@@ -632,8 +667,8 @@ def present(name,
                 # pwd incorrectly reports presence of home
                 ret['changes']['home'] = ''
             if 'shadow.info' in __salt__ \
-                and not salt.utils.is_windows()\
-                and not salt.utils.is_darwin():
+                and not salt.utils.platform.is_windows() \
+                and not salt.utils.platform.is_darwin():
                 if password and not empty_password:
                     __salt__['shadow.set_password'](name, password)
                     spost = __salt__['shadow.info'](name)
@@ -643,6 +678,14 @@ def present(name,
                                          ' {1}'.format(name, 'XXX-REDACTED-XXX')
                         ret['result'] = False
                     ret['changes']['password'] = 'XXX-REDACTED-XXX'
+                if empty_password and not password:
+                    __salt__['shadow.del_password'](name)
+                    spost = __salt__['shadow.info'](name)
+                    if spost['passwd'] != '':
+                        ret['comment'] = 'User {0} created but failed to ' \
+                                         'empty password'.format(name)
+                        ret['result'] = False
+                    ret['changes']['password'] = ''
                 if date:
                     __salt__['shadow.set_date'](name, date)
                     spost = __salt__['shadow.info'](name)
@@ -697,14 +740,24 @@ def present(name,
                                          ' {1}'.format(name, expire)
                         ret['result'] = False
                     ret['changes']['expire'] = expire
-            elif salt.utils.is_windows() and password and not empty_password:
-                if not __salt__['user.setpassword'](name, password):
-                    ret['comment'] = 'User {0} created but failed to set' \
-                                     ' password to' \
-                                     ' {1}'.format(name, 'XXX-REDACTED-XXX')
-                    ret['result'] = False
-                ret['changes']['passwd'] = 'XXX-REDACTED-XXX'
-            elif salt.utils.is_darwin() and password and not empty_password:
+            elif salt.utils.platform.is_windows():
+                if password and not empty_password:
+                    if not __salt__['user.setpassword'](name, password):
+                        ret['comment'] = 'User {0} created but failed to set' \
+                                         ' password to' \
+                                         ' {1}'.format(name, 'XXX-REDACTED-XXX')
+                        ret['result'] = False
+                    ret['changes']['passwd'] = 'XXX-REDACTED-XXX'
+                if expire:
+                    __salt__['shadow.set_expire'](name, expire)
+                    spost = __salt__['shadow.info'](name)
+                    if salt.utils.date_format(spost['expire']) != salt.utils.date_format(expire):
+                        ret['comment'] = 'User {0} created but failed to set' \
+                                         ' expire days to' \
+                                         ' {1}'.format(name, expire)
+                        ret['result'] = False
+                    ret['changes']['expiration_date'] = spost['expire']
+            elif salt.utils.platform.is_darwin() and password and not empty_password:
                 if not __salt__['shadow.set_password'](name, password):
                     ret['comment'] = 'User {0} created but failed to set' \
                                      ' password to' \

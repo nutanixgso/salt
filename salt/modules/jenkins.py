@@ -2,7 +2,14 @@
 '''
 Module for controlling Jenkins
 
+:depends: python-jenkins
+
 .. versionadded:: 2016.3.0
+
+:depends: python-jenkins_ Python module (not to be confused with jenkins_)
+
+.. _python-jenkins: https://pypi.python.org/pypi/python-jenkins
+.. _jenkins: https://pypi.python.org/pypi/jenkins
 
 :configuration: This module can be used by either passing an api key and version
     directly or by specifying both in a configuration profile in the salt
@@ -26,7 +33,7 @@ try:
 except ImportError:
     HAS_JENKINS = False
 
-import salt.utils
+import salt.utils.files
 
 # Import 3rd-party libs
 # pylint: disable=import-error,no-name-in-module,redefined-builtin
@@ -45,9 +52,15 @@ def __virtual__():
     :return: The virtual name of the module.
     '''
     if HAS_JENKINS:
-        return __virtualname__
+        if hasattr(jenkins, 'Jenkins'):
+            return __virtualname__
+        else:
+            return (False,
+                    'The wrong Python module appears to be installed. Please '
+                    'make sure that \'python-jenkins\' is installed, not '
+                    '\'jenkins\'.')
     return (False, 'The jenkins execution module cannot be loaded: '
-            'python jenkins library is not installed.')
+                   'python-jenkins is not installed.')
 
 
 def _connect():
@@ -71,15 +84,29 @@ def _connect():
     if not jenkins_url:
         raise SaltInvocationError('No Jenkins URL found.')
 
-    if not jenkins_user:
-        raise SaltInvocationError('No Jenkins User found.')
-
-    if not jenkins_password:
-        raise SaltInvocationError('No Jenkins Password or API token found.')
-
     return jenkins.Jenkins(jenkins_url,
                            username=jenkins_user,
                            password=jenkins_password)
+
+
+def run(script):
+    '''
+    .. versionadded:: Carbon
+
+    Execute a groovy script on the jenkins master
+
+    :param script: The groovy script
+
+    CLI Example:
+
+    .. code-block::
+
+        salt '*' jenkins.run 'Jenkins.instance.doSafeRestart()'
+
+    '''
+
+    server = _connect()
+    return server.run_script(script)
 
 
 def get_version():
@@ -237,7 +264,7 @@ def create_job(name=None,
     else:
         config_xml_file = __salt__['cp.cache_file'](config_xml, saltenv)
 
-        with salt.utils.fopen(config_xml_file) as _fp:
+        with salt.utils.files.fopen(config_xml_file) as _fp:
             config_xml = _fp.read()
 
     server = _connect()
@@ -276,7 +303,7 @@ def update_job(name=None,
     else:
         config_xml_file = __salt__['cp.cache_file'](config_xml, saltenv)
 
-        with salt.utils.fopen(config_xml_file) as _fp:
+        with salt.utils.files.fopen(config_xml_file) as _fp:
             config_xml = _fp.read()
 
     server = _connect()
@@ -430,7 +457,7 @@ def get_job_config(name=None):
 
 def plugin_installed(name):
     '''
-    .. versionadded:: Carbon
+    .. versionadded:: 2016.11.0
 
     Return if the plugin is installed for the provided plugin name.
 

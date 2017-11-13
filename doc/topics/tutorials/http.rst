@@ -1,3 +1,5 @@
+.. _tutorial-http:
+
 HTTP Modules
 ============
 
@@ -54,6 +56,9 @@ This function forms a basic query, but with some add-ons not present in the
 currently available in these libraries has been added, but can be in future
 iterations.
 
+HTTPS Request Methods
+`````````````````````
+
 A basic query can be performed by calling this function with no more than a
 single URL:
 
@@ -80,7 +85,10 @@ required by the remote server (XML, JSON, plain text, etc).
         data=json.loads(mydict)
     )
 
-Bear in mind that this data must be sent pre-formatted; this function will not
+Data Formatting and Templating
+``````````````````````````````
+
+Bear in mind that the data must be sent pre-formatted; this function will not
 format it for you. However, a templated file stored on the local system may be
 passed through, along with variables to populate it with. To pass through only
 the file (untemplated):
@@ -145,6 +153,9 @@ However, this can be changed to ``master`` if necessary.
         node='master'
     )
 
+Headers
+```````
+
 Headers may also be passed through, either as a ``header_list``, a
 ``header_dict``, or as a ``header_file``. As with the ``data_file``, the
 ``header_file`` may also be templated. Take note that because HTTP headers are
@@ -166,6 +177,9 @@ Because much of the data that would be templated between headers and data may be
 the same, the ``template_data`` is the same for both. Correcting possible
 variable name collisions is up to the user.
 
+Authentication
+``````````````
+
 The ``query()`` function supports basic HTTP authentication. A username and
 password may be passed in as ``username`` and ``password``, respectively.
 
@@ -176,6 +190,9 @@ password may be passed in as ``username`` and ``password``, respectively.
         username='larry',
         password=`5700g3543v4r`,
     )
+
+Cookies and Sessions
+````````````````````
 
 Cookies are also supported, using Python's built-in ``cookielib``. However, they
 are turned off by default. To turn cookies on, set ``cookies`` to True.
@@ -230,15 +247,44 @@ The format of this file is msgpack, which is consistent with much of the rest
 of Salt's internal structure. Historically, the extension for this file is
 ``.p``. There are no current plans to make this configurable.
 
+Proxy
+`````
+
+If the ``tornado`` backend is used (``tornado`` is the default), proxy
+information configured in ``proxy_host``, ``proxy_port``, ``proxy_username``,
+and ``proxy_password`` from the ``__opts__`` dictionary will be used.  Normally
+these are set in the minion configuration file.
+
+.. code-block:: yaml
+
+    proxy_host: proxy.my-domain
+    proxy_port: 31337
+    proxy_username: charon
+    proxy_password: obolus
+
+.. code-block:: python
+
+    salt.utils.http.query(
+        'http://example.com',
+        opts=__opts__,
+        backend='tornado'
+    )
+
 Return Data
 ~~~~~~~~~~~
 
-By default, ``query()`` will attempt to decode the return data. Because it was
-designed to be used with REST interfaces, it will attempt to decode the data
-received from the remote server. First it will check the ``Content-type`` header
-to try and find references to XML. If it does not find any, it will look for
-references to JSON. If it does not find any, it will fall back to plain text,
-which will not be decoded.
+.. note:: Return data encoding
+
+    If ``decode`` is set to ``True``, ``query()`` will attempt to decode the
+    return data. ``decode_type`` defaults to ``auto``.  Set it to a specific
+    encoding, ``xml``, for example, to override autodetection.
+
+Because Salt's http library was designed to be used with REST interfaces,
+``query()`` will attempt to decode the data received from the remote server
+when ``decode`` is set to ``True``.  First it will check the ``Content-type``
+header to try and find references to XML. If it does not find any, it will look
+for references to JSON. If it does not find any, it will fall back to plain
+text, which will not be decoded.
 
 JSON data is translated into a dict using Python's built-in ``json`` library.
 XML is translated using ``salt.utils.xml_util``, which will use Python's
@@ -331,7 +377,8 @@ using the ``ca_bundle`` variable.
     )
 
 Updating CA Bundles
-+++++++++++++++++++
+```````````````````
+
 The ``update_ca_bundle()`` function can be used to update the bundle file at a
 specified location. If the target location is not specified, then it will
 attempt to auto-detect the location of the bundle file. If the URL to download

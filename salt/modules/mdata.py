@@ -14,7 +14,8 @@ from __future__ import absolute_import
 import logging
 
 # Import Salt libs
-import salt.utils
+import salt.utils.path
+import salt.utils.platform
 import salt.utils.decorators as decorators
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def _check_mdata_list():
     '''
     looks to see if mdata-list is present on the system
     '''
-    return salt.utils.which('mdata-list')
+    return salt.utils.path.which('mdata-list')
 
 
 @decorators.memoize
@@ -44,7 +45,7 @@ def _check_mdata_get():
     '''
     looks to see if mdata-get is present on the system
     '''
-    return salt.utils.which('mdata-get')
+    return salt.utils.path.which('mdata-get')
 
 
 @decorators.memoize
@@ -52,7 +53,7 @@ def _check_mdata_put():
     '''
     looks to see if mdata-put is present on the system
     '''
-    return salt.utils.which('mdata-put')
+    return salt.utils.path.which('mdata-put')
 
 
 @decorators.memoize
@@ -60,14 +61,14 @@ def _check_mdata_delete():
     '''
     looks to see if mdata-delete is present on the system
     '''
-    return salt.utils.which('mdata-delete')
+    return salt.utils.path.which('mdata-delete')
 
 
 def __virtual__():
     '''
     Provides mdata only on SmartOS
     '''
-    if _check_mdata_list() and not salt.utils.is_smartos_globalzone():
+    if _check_mdata_list() and not salt.utils.platform.is_smartos_globalzone():
         return __virtualname__
     return (
         False,
@@ -103,7 +104,7 @@ def get_(*keyname):
 
     .. note::
 
-        If no keynames are specified, we get all properties
+        If no keynames are specified, we get all (public) properties
 
     CLI Example:
 
@@ -113,16 +114,16 @@ def get_(*keyname):
         salt '*' mdata.get user-script salt:role
     '''
     mdata = _check_mdata_get()
-    valid_keynames = list_()
     ret = {}
 
     if len(keyname) == 0:
-        keyname = valid_keynames
+        keyname = list_()
 
     for k in keyname:
-        if mdata and k in valid_keynames:
+        if mdata:
             cmd = '{0} {1}'.format(mdata, k)
-            ret[k] = __salt__['cmd.run'](cmd)
+            res = __salt__['cmd.run_all'](cmd)
+            ret[k] = res['stdout'] if res['retcode'] == 0 else ''
         else:
             ret[k] = ''
 

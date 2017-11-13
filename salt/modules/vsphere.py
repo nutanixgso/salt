@@ -4,6 +4,8 @@ Manage VMware vCenter servers and ESXi hosts.
 
 .. versionadded:: 2015.8.4
 
+:codeauthor: :email:`Alexandru Bleotu <alexandru.bleotu@morganstaley.com>`
+
 Dependencies
 ============
 
@@ -162,14 +164,20 @@ connection credentials are used instead of vCenter credentials, the ``host_names
 from __future__ import absolute_import
 import datetime
 import logging
+import sys
+import inspect
+from functools import wraps
 
 # Import Salt Libs
-import salt.ext.six as six
+from salt.ext import six
 import salt.utils
-import salt.utils.vmware
+import salt.utils.args
+import salt.utils.dictupdate as dictupdate
 import salt.utils.http
-from salt.utils import dictupdate
-from salt.exceptions import CommandExecutionError
+import salt.utils.path
+import salt.utils.vmware
+from salt.exceptions import CommandExecutionError, VMwareSaltError
+from salt.utils.decorators import depends, ignores_kwargs
 
 # Import Third Party Libs
 try:
@@ -178,24 +186,215 @@ try:
 except ImportError:
     HAS_PYVMOMI = False
 
+esx_cli = salt.utils.path.which('esxcli')
+if esx_cli:
+    HAS_ESX_CLI = True
+else:
+    HAS_ESX_CLI = False
+
 log = logging.getLogger(__name__)
 
 __virtualname__ = 'vsphere'
-__proxyenabled__ = ['esxi']
+__proxyenabled__ = ['esxi', 'esxdatacenter']
 
 
 def __virtual__():
-    if not HAS_PYVMOMI:
-        return False, 'Missing dependency: The vSphere module requires the pyVmomi Python module.'
-
-    esx_cli = salt.utils.which('esxcli')
-    if not esx_cli:
-        return False, 'Missing dependency: The vSphere module requires ESXCLI.'
-
     return __virtualname__
 
 
-def esxcli_cmd(host, username, password, cmd_str, protocol=None, port=None, esxi_hosts=None):
+def get_proxy_type():
+    '''
+    Returns the proxy type retrieved either from the pillar of from the proxy
+    minion's config.  Returns ``<undefined>`` otherwise.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vsphere.get_proxy_type
+    '''
+    if __pillar__.get('proxy', {}).get('proxytype'):
+        return __pillar__['proxy']['proxytype']
+    if __opts__.get('proxy', {}).get('proxytype'):
+        return __opts__['proxy']['proxytype']
+    return '<undefined>'
+
+
+def _get_proxy_connection_details():
+    '''
+    Returns the connection details of the following proxies: esxi
+    '''
+    proxytype = get_proxy_type()
+    if proxytype == 'esxi':
+        details = __salt__['esxi.get_details']()
+    elif proxytype == 'esxdatacenter':
+        details = __salt__['esxdatacenter.get_details']()
+    else:
+        raise CommandExecutionError('\'{0}\' proxy is not supported'
+                                    ''.format(proxytype))
+    return \
+            details.get('vcenter') if 'vcenter' in details \
+            else details.get('host'), \
+            details.get('username'), \
+            details.get('password'), details.get('protocol'), \
+            details.get('port'), details.get('mechanism'), \
+            details.get('principal'), details.get('domain')
+
+
+def supports_proxies(*proxy_types):
+    '''
+    Decorator to specify which proxy types are supported by a function
+
+    proxy_types:
+        Arbitrary list of strings with the supported types of proxies
+    '''
+    def _supports_proxies(fn):
+        @wraps(fn)
+        def __supports_proxies(*args, **kwargs):
+            proxy_type = get_proxy_type()
+            if proxy_type not in proxy_types:
+                raise CommandExecutionError(
+                    '\'{0}\' proxy is not supported by function {1}'
+                    ''.format(proxy_type, fn.__name__))
+            return fn(*args, **salt.utils.args.clean_kwargs(**kwargs))
+        return __supports_proxies
+    return _supports_proxies
+
+
+def gets_service_instance_via_proxy(fn):
+    '''
+    Decorator that connects to a target system (vCenter or ESXi host) using the
+    proxy details and passes the connection (vim.ServiceInstance) to
+    the decorated function.
+
+    Supported proxies: esxi, esxdatacenter.
+
+    Notes:
+        1. The decorated function must have a ``service_instance`` parameter
+        or a ``**kwarg`` type argument (name of argument is not important);
+        2. If the ``service_instance`` parameter is already defined, the value
+        is passed through to the decorated function;
+        3. If the ``service_instance`` parameter in not defined, the
+        connection is created using the proxy details and the service instance
+        is returned.
+
+    CLI Example:
+        None, this is a decorator
+    '''
+    fn_name = fn.__name__
+    try:
+        arg_names, args_name, kwargs_name, default_values, _, _, _ = \
+                inspect.getfullargspec(fn)
+    except AttributeError:
+        # Fallback to Python 2.7
+        arg_names, args_name, kwargs_name, default_values = \
+                inspect.getargspec(fn)
+    default_values = default_values if default_values is not None else []
+
+    @wraps(fn)
+    def _gets_service_instance_via_proxy(*args, **kwargs):
+        if 'service_instance' not in arg_names and not kwargs_name:
+            raise CommandExecutionError(
+                'Function {0} must have either a \'service_instance\', or a '
+                '\'**kwargs\' type parameter'.format(fn_name))
+        connection_details = _get_proxy_connection_details()
+        # Figure out how to pass in the connection value
+        local_service_instance = None
+        if 'service_instance' in arg_names:
+            idx = arg_names.index('service_instance')
+            if idx >= len(arg_names) - len(default_values):
+                # 'service_instance' has a default value:
+                #     we check if we need to instantiate it or
+                #     pass it through
+                #
+                # NOTE: if 'service_instance' doesn't have a default value
+                # it must be explicitly set in the function call so we pass it
+                # through
+
+                # There are two cases:
+                #   1. service_instance was passed in as a positional parameter
+                #   2. service_instance was passed in as a named paramter
+                if len(args) > idx:
+                    # case 1: The call was made with enough positional
+                    # parameters to include 'service_instance'
+                    if not args[idx]:
+                        local_service_instance = \
+                                salt.utils.vmware.get_service_instance(
+                                    *connection_details)
+                        args[idx] = local_service_instance
+                else:
+                    # case 2: Not enough positional parameters so
+                    # 'service_instance' must be a named parameter
+                    if not kwargs.get('service_instance'):
+                        local_service_instance = \
+                                salt.utils.vmware.get_service_instance(
+                                    *connection_details)
+                        kwargs['service_instance'] = local_service_instance
+        else:
+            # 'service_instance' is not a paremter in the function definition
+            # but it will be caught by the **kwargs parameter
+            if not kwargs.get('service_instance'):
+                local_service_instance = \
+                        salt.utils.vmware.get_service_instance(
+                            *connection_details)
+                kwargs['service_instance'] = local_service_instance
+        try:
+            ret = fn(*args, **salt.utils.args.clean_kwargs(**kwargs))
+            # Disconnect if connected in the decorator
+            if local_service_instance:
+                salt.utils.vmware.disconnect(local_service_instance)
+            return ret
+        except Exception as e:
+            # Disconnect if connected in the decorator
+            if local_service_instance:
+                salt.utils.vmware.disconnect(local_service_instance)
+            # raise original exception and traceback
+            six.reraise(*sys.exc_info())
+    return _gets_service_instance_via_proxy
+
+
+@depends(HAS_PYVMOMI)
+@supports_proxies('esxi', 'esxdatacenter')
+def get_service_instance_via_proxy(service_instance=None):
+    '''
+    Returns a service instance to the proxied endpoint (vCenter/ESXi host).
+
+    service_instance
+        Service instance (vim.ServiceInstance) of the vCenter.
+        Default is None.
+
+    Note:
+        Should be used by state functions not invoked directly.
+
+    CLI Example:
+        See note above
+    '''
+    connection_details = _get_proxy_connection_details()
+    return salt.utils.vmware.get_service_instance(*connection_details)
+
+
+@depends(HAS_PYVMOMI)
+@supports_proxies('esxi', 'esxdatacenter')
+def disconnect(service_instance):
+    '''
+    Disconnects from a vCenter or ESXi host
+
+    Note:
+        Should be used by state functions, not invoked directly.
+
+    service_instance
+        Service instance (vim.ServiceInstance)
+
+    CLI Example:
+
+        See note above.
+    '''
+    salt.utils.vmware.disconnect(service_instance)
+    return True
+
+
+@depends(HAS_ESX_CLI)
+def esxcli_cmd(cmd_str, host=None, username=None, password=None, protocol=None, port=None, esxi_hosts=None, credstore=None):
     '''
     Run an ESXCLI command directly on the host or list of hosts.
 
@@ -226,6 +425,9 @@ def esxcli_cmd(host, username, password, cmd_str, protocol=None, port=None, esxi
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
 
+    credstore
+        Optionally set to path to the credential store file.
+
     CLI Example:
 
     .. code-block:: bash
@@ -246,7 +448,7 @@ def esxcli_cmd(host, username, password, cmd_str, protocol=None, port=None, esxi
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd_str,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             if response['retcode'] != 0:
                 ret.update({esxi_host: {'Error': response.get('stdout')}})
             else:
@@ -254,7 +456,8 @@ def esxcli_cmd(host, username, password, cmd_str, protocol=None, port=None, esxi
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd_str,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         if response['retcode'] != 0:
             ret.update({host: {'Error': response.get('stdout')}})
         else:
@@ -263,7 +466,8 @@ def esxcli_cmd(host, username, password, cmd_str, protocol=None, port=None, esxi
     return ret
 
 
-def get_coredump_network_config(host, username, password, protocol=None, port=None, esxi_hosts=None):
+@depends(HAS_ESX_CLI)
+def get_coredump_network_config(host, username, password, protocol=None, port=None, esxi_hosts=None, credstore=None):
     '''
     Retrieve information on ESXi or vCenter network dump collection and
     format it into a dictionary.
@@ -288,6 +492,9 @@ def get_coredump_network_config(host, username, password, protocol=None, port=No
     esxi_hosts
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
+
+    credstore
+        Optionally set to path to the credential store file.
 
     :return: A dictionary with the network configuration, or, if getting
              the network config failed, a an error message retrieved from the
@@ -314,7 +521,7 @@ def get_coredump_network_config(host, username, password, protocol=None, port=No
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             if response['retcode'] != 0:
                 ret.update({esxi_host: {'Error': response.get('stdout')}})
             else:
@@ -323,7 +530,8 @@ def get_coredump_network_config(host, username, password, protocol=None, port=No
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         if response['retcode'] != 0:
             ret.update({host: {'Error': response.get('stdout')}})
         else:
@@ -334,7 +542,8 @@ def get_coredump_network_config(host, username, password, protocol=None, port=No
     return ret
 
 
-def coredump_network_enable(host, username, password, enabled, protocol=None, port=None, esxi_hosts=None):
+@depends(HAS_ESX_CLI)
+def coredump_network_enable(host, username, password, enabled, protocol=None, port=None, esxi_hosts=None, credstore=None):
     '''
     Enable or disable ESXi core dump collection. Returns ``True`` if coredump is enabled
     and returns ``False`` if core dump is not enabled. If there was an error, the error
@@ -364,6 +573,9 @@ def coredump_network_enable(host, username, password, enabled, protocol=None, po
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
 
+    credstore
+        Optionally set to path to the credential store file.
+
     CLI Example:
 
     .. code-block:: bash
@@ -389,7 +601,7 @@ def coredump_network_enable(host, username, password, enabled, protocol=None, po
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             if response['retcode'] != 0:
                 ret.update({esxi_host: {'Error': response.get('stdout')}})
             else:
@@ -398,7 +610,8 @@ def coredump_network_enable(host, username, password, enabled, protocol=None, po
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         if response['retcode'] != 0:
             ret.update({host: {'Error': response.get('stdout')}})
         else:
@@ -407,6 +620,7 @@ def coredump_network_enable(host, username, password, enabled, protocol=None, po
     return ret
 
 
+@depends(HAS_ESX_CLI)
 def set_coredump_network_config(host,
                                 username,
                                 password,
@@ -415,7 +629,8 @@ def set_coredump_network_config(host,
                                 port=None,
                                 host_vnic='vmk0',
                                 dump_port=6500,
-                                esxi_hosts=None):
+                                esxi_hosts=None,
+                                credstore=None):
     '''
 
     Set the network parameters for a network coredump collection.
@@ -452,6 +667,9 @@ def set_coredump_network_config(host,
     dump_port
         TCP port to use for the dump, defaults to ``6500``.
 
+    credstore
+        Optionally set to path to the credential store file.
+
     :return: A standard cmd.run_all dictionary with a `success` key added, per host.
              `success` will be True if the set succeeded, False otherwise.
 
@@ -477,7 +695,7 @@ def set_coredump_network_config(host,
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             if response['retcode'] != 0:
                 response['success'] = False
             else:
@@ -488,7 +706,8 @@ def set_coredump_network_config(host,
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         if response['retcode'] != 0:
             response['success'] = False
         else:
@@ -498,7 +717,8 @@ def set_coredump_network_config(host,
     return ret
 
 
-def get_firewall_status(host, username, password, protocol=None, port=None, esxi_hosts=None):
+@depends(HAS_ESX_CLI)
+def get_firewall_status(host, username, password, protocol=None, port=None, esxi_hosts=None, credstore=None):
     '''
     Show status of all firewall rule sets.
 
@@ -522,6 +742,9 @@ def get_firewall_status(host, username, password, protocol=None, port=None, esxi
     esxi_hosts
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
+
+    credstore
+        Optionally set to path to the credential store file.
 
     :return: Nested dictionary with two toplevel keys ``rulesets`` and ``success``
              ``success`` will be True or False depending on query success
@@ -549,7 +772,7 @@ def get_firewall_status(host, username, password, protocol=None, port=None, esxi
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             if response['retcode'] != 0:
                 ret.update({esxi_host: {'Error': response['stdout'],
                                         'success': False,
@@ -560,7 +783,8 @@ def get_firewall_status(host, username, password, protocol=None, port=None, esxi
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         if response['retcode'] != 0:
             ret.update({host: {'Error': response['stdout'],
                                'success': False,
@@ -572,6 +796,7 @@ def get_firewall_status(host, username, password, protocol=None, port=None, esxi
     return ret
 
 
+@depends(HAS_ESX_CLI)
 def enable_firewall_ruleset(host,
                             username,
                             password,
@@ -579,7 +804,8 @@ def enable_firewall_ruleset(host,
                             ruleset_name,
                             protocol=None,
                             port=None,
-                            esxi_hosts=None):
+                            esxi_hosts=None,
+                            credstore=None):
     '''
     Enable or disable an ESXi firewall rule set.
 
@@ -610,6 +836,9 @@ def enable_firewall_ruleset(host,
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
 
+    credstore
+        Optionally set to path to the credential store file.
+
     :return: A standard cmd.run_all dictionary, per host.
 
     CLI Example:
@@ -635,18 +864,20 @@ def enable_firewall_ruleset(host,
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             ret.update({esxi_host: response})
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         ret.update({host: response})
 
     return ret
 
 
-def syslog_service_reload(host, username, password, protocol=None, port=None, esxi_hosts=None):
+@depends(HAS_ESX_CLI)
+def syslog_service_reload(host, username, password, protocol=None, port=None, esxi_hosts=None, credstore=None):
     '''
     Reload the syslog service so it will pick up any changes.
 
@@ -670,6 +901,9 @@ def syslog_service_reload(host, username, password, protocol=None, port=None, es
     esxi_hosts
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
+
+    credstore
+        Optionally set to path to the credential store file.
 
     :return: A standard cmd.run_all dictionary.  This dictionary will at least
              have a `retcode` key.  If `retcode` is 0 the command was successful.
@@ -695,17 +929,19 @@ def syslog_service_reload(host, username, password, protocol=None, port=None, es
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             ret.update({esxi_host: response})
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         ret.update({host: response})
 
     return ret
 
 
+@depends(HAS_ESX_CLI)
 def set_syslog_config(host,
                       username,
                       password,
@@ -715,7 +951,8 @@ def set_syslog_config(host,
                       port=None,
                       firewall=True,
                       reset_service=True,
-                      esxi_hosts=None):
+                      esxi_hosts=None,
+                      credstore=None):
     '''
     Set the specified syslog configuration parameter. By default, this function will
     reset the syslog service after the configuration is set.
@@ -761,6 +998,9 @@ def set_syslog_config(host,
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
 
+    credstore
+        Optionally set to path to the credential store file.
+
     :return: Dictionary with a top-level key of 'success' which indicates
              if all the parameters were reset, and individual keys
              for each parameter indicating which succeeded or failed, per host.
@@ -791,7 +1031,7 @@ def set_syslog_config(host,
                 response = enable_firewall_ruleset(host, username, password,
                                                    ruleset_enable=True, ruleset_name='syslog',
                                                    protocol=protocol, port=port,
-                                                   esxi_hosts=[esxi_host]).get(esxi_host)
+                                                   esxi_hosts=[esxi_host], credstore=credstore).get(esxi_host)
                 if response['retcode'] != 0:
                     ret.update({esxi_host: {'enable_firewall': {'message': response['stdout'],
                                                                 'success': False}}})
@@ -801,7 +1041,8 @@ def set_syslog_config(host,
             # Handles a single host or a vCenter connection when no esxi_hosts are provided.
             response = enable_firewall_ruleset(host, username, password,
                                                ruleset_enable=True, ruleset_name='syslog',
-                                               protocol=protocol, port=port).get(host)
+                                               protocol=protocol, port=port,
+                                               credstore=credstore).get(host)
             if response['retcode'] != 0:
                 ret.update({host: {'enable_firewall': {'message': response['stdout'],
                                                        'success': False}}})
@@ -816,7 +1057,8 @@ def set_syslog_config(host,
         for esxi_host in esxi_hosts:
             response = _set_syslog_config_helper(host, username, password, syslog_config,
                                                  config_value, protocol=protocol, port=port,
-                                                 reset_service=reset_service, esxi_host=esxi_host)
+                                                 reset_service=reset_service, esxi_host=esxi_host,
+                                                 credstore=credstore)
             # Ensure we don't overwrite any dictionary data already set
             # By updating the esxi_host directly.
             if ret.get(esxi_host) is None:
@@ -827,7 +1069,7 @@ def set_syslog_config(host,
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = _set_syslog_config_helper(host, username, password, syslog_config,
                                              config_value, protocol=protocol, port=port,
-                                             reset_service=reset_service)
+                                             reset_service=reset_service, credstore=credstore)
         # Ensure we don't overwrite any dictionary data already set
         # By updating the host directly.
         if ret.get(host) is None:
@@ -837,7 +1079,8 @@ def set_syslog_config(host,
     return ret
 
 
-def get_syslog_config(host, username, password, protocol=None, port=None, esxi_hosts=None):
+@depends(HAS_ESX_CLI)
+def get_syslog_config(host, username, password, protocol=None, port=None, esxi_hosts=None, credstore=None):
     '''
     Retrieve the syslog configuration.
 
@@ -861,6 +1104,9 @@ def get_syslog_config(host, username, password, protocol=None, port=None, esxi_h
     esxi_hosts
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
+
+    credstore
+        Optionally set to path to the credential store file.
 
     :return: Dictionary with keys and values corresponding to the
              syslog configuration, per host.
@@ -886,26 +1132,29 @@ def get_syslog_config(host, username, password, protocol=None, port=None, esxi_h
         for esxi_host in esxi_hosts:
             response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                                 protocol=protocol, port=port,
-                                                esxi_host=esxi_host)
+                                                esxi_host=esxi_host, credstore=credstore)
             # format the response stdout into something useful
             ret.update({esxi_host: _format_syslog_config(response)})
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response = salt.utils.vmware.esxcli(host, username, password, cmd,
-                                            protocol=protocol, port=port)
+                                            protocol=protocol, port=port,
+                                            credstore=credstore)
         # format the response stdout into something useful
         ret.update({host: _format_syslog_config(response)})
 
     return ret
 
 
+@depends(HAS_ESX_CLI)
 def reset_syslog_config(host,
                         username,
                         password,
                         protocol=None,
                         port=None,
                         syslog_config=None,
-                        esxi_hosts=None):
+                        esxi_hosts=None,
+                        credstore=None):
     '''
     Reset the syslog service to its default settings.
 
@@ -937,6 +1186,9 @@ def reset_syslog_config(host,
     esxi_hosts
         If ``host`` is a vCenter host, then use esxi_hosts to execute this function
         on a list of one or more ESXi machines.
+
+    credstore
+        Optionally set to path to the credential store file.
 
     :return: Dictionary with a top-level key of 'success' which indicates
              if all the parameters were reset, and individual keys
@@ -979,18 +1231,20 @@ def reset_syslog_config(host,
             response_dict = _reset_syslog_config_params(host, username, password,
                                                         cmd, resets, valid_resets,
                                                         protocol=protocol, port=port,
-                                                        esxi_host=esxi_host)
+                                                        esxi_host=esxi_host, credstore=credstore)
             ret.update({esxi_host: response_dict})
     else:
         # Handles a single host or a vCenter connection when no esxi_hosts are provided.
         response_dict = _reset_syslog_config_params(host, username, password,
                                                     cmd, resets, valid_resets,
-                                                    protocol=protocol, port=port)
+                                                    protocol=protocol, port=port,
+                                                    credstore=credstore)
         ret.update({host: response_dict})
 
     return ret
 
 
+@ignores_kwargs('credstore')
 def upload_ssh_key(host, username, password, ssh_key=None, ssh_key_file=None,
                    protocol=None, port=None, certificate_verify=False):
     '''
@@ -1062,6 +1316,7 @@ def upload_ssh_key(host, username, password, ssh_key=None, ssh_key_file=None,
     return ret
 
 
+@ignores_kwargs('credstore')
 def get_ssh_key(host,
                 username,
                 password,
@@ -1118,6 +1373,8 @@ def get_ssh_key(host,
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def get_host_datetime(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Get the date/time information for a given host or list of host_names.
@@ -1175,6 +1432,8 @@ def get_host_datetime(host, username, password, protocol=None, port=None, host_n
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def get_ntp_config(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Get the NTP configuration information for a given host or list of host_names.
@@ -1231,6 +1490,8 @@ def get_ntp_config(host, username, password, protocol=None, port=None, host_name
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def get_service_policy(host, username, password, service_name, protocol=None, port=None, host_names=None):
     '''
     Get the service name's policy for a given host or list of hosts.
@@ -1336,6 +1597,8 @@ def get_service_policy(host, username, password, service_name, protocol=None, po
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def get_service_running(host, username, password, service_name, protocol=None, port=None, host_names=None):
     '''
     Get the service name's running state for a given host or list of hosts.
@@ -1441,6 +1704,8 @@ def get_service_running(host, username, password, service_name, protocol=None, p
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def get_vmotion_enabled(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Get the VMotion enabled status for a given host or a list of host_names. Returns ``True``
@@ -1501,6 +1766,8 @@ def get_vmotion_enabled(host, username, password, protocol=None, port=None, host
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def get_vsan_enabled(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Get the VSAN enabled status for a given host or a list of host_names. Returns ``True``
@@ -1566,6 +1833,8 @@ def get_vsan_enabled(host, username, password, protocol=None, port=None, host_na
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def get_vsan_eligible_disks(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Returns a list of VSAN-eligible disks for a given host or list of host_names.
@@ -1616,7 +1885,7 @@ def get_vsan_eligible_disks(host, username, password, protocol=None, port=None, 
     response = _get_vsan_eligible_disks(service_instance, host, host_names)
 
     ret = {}
-    for host_name, value in response.iteritems():
+    for host_name, value in six.iteritems(response):
         error = value.get('Error')
         if error:
             ret.update({host_name: {'Error': error}})
@@ -1639,6 +1908,29 @@ def get_vsan_eligible_disks(host, username, password, protocol=None, port=None, 
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@supports_proxies('esxi', 'esxdatacenter')
+@gets_service_instance_via_proxy
+def test_vcenter_connection(service_instance=None):
+    '''
+    Checks if a connection is to a vCenter
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' vsphere.test_vcenter_connection
+    '''
+    try:
+        if salt.utils.vmware.is_connection_to_a_vcenter(service_instance):
+            return True
+    except VMwareSaltError:
+        return False
+    return False
+
+
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def system_info(host, username, password, protocol=None, port=None):
     '''
     Return system information about a VMware environment.
@@ -1678,6 +1970,8 @@ def system_info(host, username, password, protocol=None, port=None):
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_datacenters(host, username, password, protocol=None, port=None):
     '''
     Returns a list of datacenters for the the specified host.
@@ -1699,9 +1993,12 @@ def list_datacenters(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_datacenters 1.2.3.4 root bad-password
+
     '''
     service_instance = salt.utils.vmware.get_service_instance(host=host,
                                                               username=username,
@@ -1711,6 +2008,8 @@ def list_datacenters(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_datacenters(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_clusters(host, username, password, protocol=None, port=None):
     '''
     Returns a list of clusters for the the specified host.
@@ -1732,9 +2031,12 @@ def list_clusters(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_clusters 1.2.3.4 root bad-password
+
     '''
     service_instance = salt.utils.vmware.get_service_instance(host=host,
                                                               username=username,
@@ -1744,6 +2046,8 @@ def list_clusters(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_clusters(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_datastore_clusters(host, username, password, protocol=None, port=None):
     '''
     Returns a list of datastore clusters for the the specified host.
@@ -1765,6 +2069,8 @@ def list_datastore_clusters(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_datastore_clusters 1.2.3.4 root bad-password
@@ -1777,6 +2083,8 @@ def list_datastore_clusters(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_datastore_clusters(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_datastores(host, username, password, protocol=None, port=None):
     '''
     Returns a list of datastores for the the specified host.
@@ -1798,6 +2106,8 @@ def list_datastores(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_datastores 1.2.3.4 root bad-password
@@ -1810,6 +2120,8 @@ def list_datastores(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_datastores(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_hosts(host, username, password, protocol=None, port=None):
     '''
     Returns a list of hosts for the the specified VMware environment.
@@ -1831,6 +2143,8 @@ def list_hosts(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_hosts 1.2.3.4 root bad-password
@@ -1843,6 +2157,8 @@ def list_hosts(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_hosts(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_resourcepools(host, username, password, protocol=None, port=None):
     '''
     Returns a list of resource pools for the the specified host.
@@ -1864,6 +2180,8 @@ def list_resourcepools(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_resourcepools 1.2.3.4 root bad-password
@@ -1876,6 +2194,8 @@ def list_resourcepools(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_resourcepools(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_networks(host, username, password, protocol=None, port=None):
     '''
     Returns a list of networks for the the specified host.
@@ -1897,6 +2217,8 @@ def list_networks(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_networks 1.2.3.4 root bad-password
@@ -1909,6 +2231,8 @@ def list_networks(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_networks(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_vms(host, username, password, protocol=None, port=None):
     '''
     Returns a list of VMs for the the specified host.
@@ -1930,6 +2254,8 @@ def list_vms(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_vms 1.2.3.4 root bad-password
@@ -1942,6 +2268,8 @@ def list_vms(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_vms(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_folders(host, username, password, protocol=None, port=None):
     '''
     Returns a list of folders for the the specified host.
@@ -1963,6 +2291,8 @@ def list_folders(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_folders 1.2.3.4 root bad-password
@@ -1975,6 +2305,8 @@ def list_folders(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_folders(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_dvs(host, username, password, protocol=None, port=None):
     '''
     Returns a list of distributed virtual switches for the the specified host.
@@ -1996,6 +2328,8 @@ def list_dvs(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
         salt '*' vsphere.list_dvs 1.2.3.4 root bad-password
@@ -2008,6 +2342,8 @@ def list_dvs(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_dvs(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_vapps(host, username, password, protocol=None, port=None):
     '''
     Returns a list of vApps for the the specified host.
@@ -2029,8 +2365,11 @@ def list_vapps(host, username, password, protocol=None, port=None):
         Optionally set to alternate port if the host is not using the default
         port. Default port is ``443``.
 
+    CLI Example:
+
     .. code-block:: bash
 
+        # List vapps from all minions
         salt '*' vsphere.list_vapps 1.2.3.4 root bad-password
     '''
     service_instance = salt.utils.vmware.get_service_instance(host=host,
@@ -2041,6 +2380,8 @@ def list_vapps(host, username, password, protocol=None, port=None):
     return salt.utils.vmware.list_vapps(service_instance)
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_ssds(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Returns a list of SSDs for the given host or list of host_names.
@@ -2100,6 +2441,8 @@ def list_ssds(host, username, password, protocol=None, port=None, host_names=Non
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def list_non_ssds(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Returns a list of Non-SSD disks for the given host or list of host_names.
@@ -2166,6 +2509,8 @@ def list_non_ssds(host, username, password, protocol=None, port=None, host_names
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def set_ntp_config(host, username, password, ntp_servers, protocol=None, port=None, host_names=None):
     '''
     Set NTP configuration for a given host of list of host_names.
@@ -2244,6 +2589,8 @@ def set_ntp_config(host, username, password, ntp_servers, protocol=None, port=No
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def service_start(host,
                   username,
                   password,
@@ -2353,6 +2700,8 @@ def service_start(host,
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def service_stop(host,
                  username,
                  password,
@@ -2462,6 +2811,8 @@ def service_stop(host,
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def service_restart(host,
                     username,
                     password,
@@ -2571,6 +2922,8 @@ def service_restart(host,
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def set_service_policy(host,
                        username,
                        password,
@@ -2698,6 +3051,8 @@ def set_service_policy(host,
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def update_host_datetime(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Update the date/time on the given host or list of host_names. This function should be
@@ -2763,6 +3118,8 @@ def update_host_datetime(host, username, password, protocol=None, port=None, hos
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def update_host_password(host, username, password, new_password, protocol=None, port=None):
     '''
     Update the password for a given host.
@@ -2824,6 +3181,8 @@ def update_host_password(host, username, password, new_password, protocol=None, 
     return True
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def vmotion_disable(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Disable vMotion for a given host or list of host_names.
@@ -2891,6 +3250,8 @@ def vmotion_disable(host, username, password, protocol=None, port=None, host_nam
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def vmotion_enable(host, username, password, protocol=None, port=None, host_names=None, device='vmk0'):
     '''
     Enable vMotion for a given host or list of host_names.
@@ -2962,6 +3323,8 @@ def vmotion_enable(host, username, password, protocol=None, port=None, host_name
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def vsan_add_disks(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Add any VSAN-eligible disks to the VSAN System for the given host or list of host_names.
@@ -3013,7 +3376,7 @@ def vsan_add_disks(host, username, password, protocol=None, port=None, host_name
     response = _get_vsan_eligible_disks(service_instance, host, host_names)
 
     ret = {}
-    for host_name, value in response.iteritems():
+    for host_name, value in six.iteritems(response):
         host_ref = _get_host_ref(service_instance, host, host_name=host_name)
         vsan_system = host_ref.configManager.vsanSystem
 
@@ -3064,6 +3427,8 @@ def vsan_add_disks(host, username, password, protocol=None, port=None, host_name
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def vsan_disable(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Disable VSAN for a given host or list of host_names.
@@ -3147,6 +3512,8 @@ def vsan_disable(host, username, password, protocol=None, port=None, host_names=
     return ret
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def vsan_enable(host, username, password, protocol=None, port=None, host_names=None):
     '''
     Enable VSAN for a given host or list of host_names.
@@ -3228,6 +3595,68 @@ def vsan_enable(host, username, password, protocol=None, port=None, host_names=N
             ret.update({host_name: {'VSAN Enabled': True}})
 
     return ret
+
+
+@depends(HAS_PYVMOMI)
+@supports_proxies('esxdatacenter')
+@gets_service_instance_via_proxy
+def list_datacenters_via_proxy(datacenter_names=None, service_instance=None):
+    '''
+    Returns a list of dict representations of VMware datacenters.
+    Connection is done via the proxy details.
+
+    Supported proxies: esxdatacenter
+
+    datacenter_names
+        List of datacenter names.
+        Default is None.
+
+    service_instance
+        Service instance (vim.ServiceInstance) of the vCenter.
+        Default is None.
+
+    .. code-block:: bash
+        salt '*' vsphere.list_datacenters_via_proxy
+
+        salt '*' vsphere.list_datacenters_via_proxy dc1
+
+        salt '*' vsphere.list_datacenters_via_proxy dc1,dc2
+
+        salt '*' vsphere.list_datacenters_via_proxy datacenter_names=[dc1, dc2]
+    '''
+    if not datacenter_names:
+        dc_refs = salt.utils.vmware.get_datacenters(service_instance,
+                                                    get_all_datacenters=True)
+    else:
+        dc_refs = salt.utils.vmware.get_datacenters(service_instance,
+                                                    datacenter_names)
+
+    return [{'name': salt.utils.vmware.get_managed_object_name(dc_ref)}
+            for dc_ref in dc_refs]
+
+
+@depends(HAS_PYVMOMI)
+@supports_proxies('esxdatacenter')
+@gets_service_instance_via_proxy
+def create_datacenter(datacenter_name, service_instance=None):
+    '''
+    Creates a datacenter.
+
+    Supported proxies: esxdatacenter
+
+    datacenter_name
+        The datacenter name
+
+    service_instance
+        Service instance (vim.ServiceInstance) of the vCenter.
+        Default is None.
+
+    .. code-block:: bash
+
+        salt '*' vsphere.create_datacenter dc1
+    '''
+    salt.utils.vmware.create_datacenter(service_instance, datacenter_name)
+    return {'create_datacenter': True}
 
 
 def _check_hosts(service_instance, host, host_names):
@@ -3454,7 +3883,7 @@ def _get_vsan_eligible_disks(service_instance, host, host_names):
 
 
 def _reset_syslog_config_params(host, username, password, cmd, resets, valid_resets,
-                                protocol=None, port=None, esxi_host=None):
+                                protocol=None, port=None, esxi_host=None, credstore=None):
     '''
     Helper function for reset_syslog_config that resets the config and populates the return dictionary.
     '''
@@ -3468,7 +3897,7 @@ def _reset_syslog_config_params(host, username, password, cmd, resets, valid_res
         if reset_param in valid_resets:
             ret = salt.utils.vmware.esxcli(host, username, password, cmd + reset_param,
                                            protocol=protocol, port=port,
-                                           esxi_host=esxi_host)
+                                           esxi_host=esxi_host, credstore=credstore)
             ret_dict[reset_param] = {}
             ret_dict[reset_param]['success'] = ret['retcode'] == 0
             if ret['retcode'] != 0:
@@ -3487,7 +3916,7 @@ def _reset_syslog_config_params(host, username, password, cmd, resets, valid_res
 
 
 def _set_syslog_config_helper(host, username, password, syslog_config, config_value,
-                              protocol=None, port=None, reset_service=None, esxi_host=None):
+                              protocol=None, port=None, reset_service=None, esxi_host=None, credstore=None):
     '''
     Helper function for set_syslog_config that sets the config and populates the return dictionary.
     '''
@@ -3503,7 +3932,7 @@ def _set_syslog_config_helper(host, username, password, syslog_config, config_va
 
     response = salt.utils.vmware.esxcli(host, username, password, cmd,
                                         protocol=protocol, port=port,
-                                        esxi_host=esxi_host)
+                                        esxi_host=esxi_host, credstore=credstore)
 
     # Update the return dictionary for success or error messages.
     if response['retcode'] != 0:
@@ -3521,42 +3950,228 @@ def _set_syslog_config_helper(host, username, password, syslog_config, config_va
             host_name = host
         response = syslog_service_reload(host, username, password,
                                          protocol=protocol, port=port,
-                                         esxi_hosts=esxi_host).get(host_name)
+                                         esxi_hosts=esxi_host, credstore=credstore).get(host_name)
         ret_dict.update({'syslog_restart': {'success': response['retcode'] == 0}})
 
     return ret_dict
 
 
+@depends(HAS_PYVMOMI)
+@ignores_kwargs('credstore')
 def add_host_to_dvs(host, username, password, vmknic_name, vmnic_name,
-                    dvs_name, portgroup_name, protocol=None, port=None,
-                    host_names=None):
+                    dvs_name, target_portgroup_name, uplink_portgroup_name,
+                    protocol=None, port=None, host_names=None):
     '''
-    Adds an ESXi host to a vSphere Distributed Virtual Switch
-    DOES NOT migrate the ESXi's physical and virtual NICs to the switch (yet)
-    (please don't remove the commented code)
+    Adds an ESXi host to a vSphere Distributed Virtual Switch and migrates
+    the desired adapters to the DVS from the standard switch.
+
+    host
+        The location of the vCenter server.
+
+    username
+        The username used to login to the vCenter server.
+
+    password
+        The password used to login to the vCenter server.
+
+    vmknic_name
+        The name of the virtual NIC to migrate.
+
+    vmnic_name
+        The name of the physical NIC to migrate.
+
+    dvs_name
+        The name of the Distributed Virtual Switch.
+
+    target_portgroup_name
+        The name of the distributed portgroup in which to migrate the
+        virtual NIC.
+
+    uplink_portgroup_name
+        The name of the uplink portgroup in which to migrate the
+        physical NIC.
+
+    protocol
+        Optionally set to alternate protocol if the vCenter server or ESX/ESXi host is not
+        using the default protocol. Default protocol is ``https``.
+
+    port
+        Optionally set to alternate port if the vCenter server or ESX/ESXi host is not
+        using the default port. Default port is ``443``.
+
+    host_names:
+        An array of VMware host names to migrate
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt some_host vsphere.add_host_to_dvs host='vsphere.corp.com'
+            username='administrator@vsphere.corp.com' password='vsphere_password'
+            vmknic_name='vmk0' vmnic_name='vnmic0' dvs_name='DSwitch'
+            target_portgroup_name='DPortGroup' uplink_portgroup_name='DSwitch1-DVUplinks-181'
+            protocol='https' port='443', host_names="['esxi1.corp.com','esxi2.corp.com','esxi3.corp.com']"
+
+    Return Example:
+
+    .. code-block:: yaml
+
+        somehost:
+            ----------
+            esxi1.corp.com:
+                ----------
+                dvs:
+                    DSwitch
+                portgroup:
+                    DPortGroup
+                status:
+                    True
+                uplink:
+                    DSwitch-DVUplinks-181
+                vmknic:
+                    vmk0
+                vmnic:
+                    vmnic0
+            esxi2.corp.com:
+                ----------
+                dvs:
+                    DSwitch
+                portgroup:
+                    DPortGroup
+                status:
+                    True
+                uplink:
+                    DSwitch-DVUplinks-181
+                vmknic:
+                    vmk0
+                vmnic:
+                    vmnic0
+            esxi3.corp.com:
+                ----------
+                dvs:
+                    DSwitch
+                portgroup:
+                    DPortGroup
+                status:
+                    True
+                uplink:
+                    DSwitch-DVUplinks-181
+                vmknic:
+                    vmk0
+                vmnic:
+                    vmnic0
+            message:
+            success:
+                True
+
+    This was very difficult to figure out.  VMware's PyVmomi documentation at
+
+    https://github.com/vmware/pyvmomi/blob/master/docs/vim/DistributedVirtualSwitch.rst
+    (which is a copy of the official documentation here:
+    https://www.vmware.com/support/developer/converter-sdk/conv60_apireference/vim.DistributedVirtualSwitch.html)
+
+    says to create the DVS, create distributed portgroups, and then add the
+    host to the DVS specifying which physical NIC to use as the port backing.
+    However, if the physical NIC is in use as the only link from the host
+    to vSphere, this will fail with an unhelpful "busy" error.
+
+    There is, however, a Powershell PowerCLI cmdlet called Add-VDSwitchPhysicalNetworkAdapter
+    that does what we want.  I used Onyx (https://labs.vmware.com/flings/onyx)
+    to sniff the SOAP stream from Powershell to our vSphere server and got
+    this snippet out:
+
+    <UpdateNetworkConfig xmlns="urn:vim25">
+      <_this type="HostNetworkSystem">networkSystem-187</_this>
+      <config>
+        <vswitch>
+          <changeOperation>edit</changeOperation>
+          <name>vSwitch0</name>
+          <spec>
+            <numPorts>7812</numPorts>
+          </spec>
+        </vswitch>
+        <proxySwitch>
+            <changeOperation>edit</changeOperation>
+            <uuid>73 a4 05 50 b0 d2 7e b9-38 80 5d 24 65 8f da 70</uuid>
+            <spec>
+            <backing xsi:type="DistributedVirtualSwitchHostMemberPnicBacking">
+                <pnicSpec><pnicDevice>vmnic0</pnicDevice></pnicSpec>
+            </backing>
+            </spec>
+        </proxySwitch>
+        <portgroup>
+          <changeOperation>remove</changeOperation>
+          <spec>
+            <name>Management Network</name><vlanId>-1</vlanId><vswitchName /><policy />
+          </spec>
+        </portgroup>
+        <vnic>
+          <changeOperation>edit</changeOperation>
+          <device>vmk0</device>
+          <portgroup />
+          <spec>
+            <distributedVirtualPort>
+              <switchUuid>73 a4 05 50 b0 d2 7e b9-38 80 5d 24 65 8f da 70</switchUuid>
+              <portgroupKey>dvportgroup-191</portgroupKey>
+            </distributedVirtualPort>
+          </spec>
+        </vnic>
+      </config>
+      <changeMode>modify</changeMode>
+    </UpdateNetworkConfig>
+
+    The SOAP API maps closely to PyVmomi, so from there it was (relatively)
+    easy to figure out what Python to write.
     '''
+    ret = {}
+    ret['success'] = True
+    ret['message'] = []
     service_instance = salt.utils.vmware.get_service_instance(host=host,
                                                               username=username,
                                                               password=password,
                                                               protocol=protocol,
                                                               port=port)
     dvs = salt.utils.vmware._get_dvs(service_instance, dvs_name)
-    target_portgroup = salt.utils.vmware._get_dvs_portgroup(dvs,
-                                                            portgroup_name)
-    uplink_portgroup = salt.utils.vmware._get_dvs_uplink_portgroup(dvs,
-                                                                   'DSwitch-DVUplinks-34')
-    dvs_uuid = dvs.config.uuid
-    host_names = _check_hosts(service_instance, host, host_names)
+    if not dvs:
+        ret['message'].append('No Distributed Virtual Switch found with name {0}'.format(dvs_name))
+        ret['success'] = False
 
-    ret = {}
+    target_portgroup = salt.utils.vmware._get_dvs_portgroup(dvs,
+                                                            target_portgroup_name)
+    if not target_portgroup:
+        ret['message'].append('No target portgroup found with name {0}'.format(target_portgroup_name))
+        ret['success'] = False
+
+    uplink_portgroup = salt.utils.vmware._get_dvs_uplink_portgroup(dvs,
+                                                                   uplink_portgroup_name)
+    if not uplink_portgroup:
+        ret['message'].append('No uplink portgroup found with name {0}'.format(uplink_portgroup_name))
+        ret['success'] = False
+
+    if len(ret['message']) > 0:
+        return ret
+
+    dvs_uuid = dvs.config.uuid
+    try:
+        host_names = _check_hosts(service_instance, host, host_names)
+    except CommandExecutionError as e:
+        ret['message'] = 'Error retrieving hosts: {0}'.format(e.msg)
+        return ret
+
     for host_name in host_names:
-        # try:
         ret[host_name] = {}
 
         ret[host_name].update({'status': False,
-                               'portgroup': portgroup_name,
+                               'uplink': uplink_portgroup_name,
+                               'portgroup': target_portgroup_name,
+                               'vmknic': vmknic_name,
+                               'vmnic': vmnic_name,
                                'dvs': dvs_name})
         host_ref = _get_host_ref(service_instance, host, host_name)
+        if not host_ref:
+            ret[host_name].update({'message': 'Host {1} not found'.format(host_name)})
+            ret['success'] = False
+            continue
 
         dvs_hostmember_config = vim.dvs.HostMember.ConfigInfo(
             host=host_ref
@@ -3565,10 +4180,25 @@ def add_host_to_dvs(host, username, password, vmknic_name, vmnic_name,
             config=dvs_hostmember_config
         )
         p_nics = salt.utils.vmware._get_pnics(host_ref)
-        p_nic = [x for x in p_nics if x.device == 'vmnic0']
+        p_nic = [x for x in p_nics if x.device == vmnic_name]
+        if len(p_nic) == 0:
+            ret[host_name].update({'message': 'Physical nic {0} not found'.format(vmknic_name)})
+            ret['success'] = False
+            continue
+
         v_nics = salt.utils.vmware._get_vnics(host_ref)
         v_nic = [x for x in v_nics if x.device == vmknic_name]
+
+        if len(v_nic) == 0:
+            ret[host_name].update({'message': 'Virtual nic {0} not found'.format(vmnic_name)})
+            ret['success'] = False
+            continue
+
         v_nic_mgr = salt.utils.vmware._get_vnic_manager(host_ref)
+        if not v_nic_mgr:
+            ret[host_name].update({'message': 'Unable to get the host\'s virtual nic manager.'})
+            ret['success'] = False
+            continue
 
         dvs_pnic_spec = vim.dvs.HostMember.PnicSpec(
             pnicDevice=vmnic_name,
@@ -3585,49 +4215,82 @@ def add_host_to_dvs(host, username, password, vmknic_name, vmnic_name,
                 configVersion=dvs.config.configVersion,
                 host=[dvs_hostmember_config_spec])
         task = dvs.ReconfigureDvs_Task(spec=dvs_config)
-        salt.utils.vmware.wait_for_task(task, host_name,
-                                        'Adding host to the DVS',
-                                        sleep_seconds=3)
+        try:
+            salt.utils.vmware.wait_for_task(task, host_name,
+                                            'Adding host to the DVS',
+                                            sleep_seconds=3)
+        except Exception as e:
+            if hasattr(e, 'message') and hasattr(e.message, 'msg'):
+                if not (host_name in e.message.msg and 'already exists' in e.message.msg):
+                    ret['success'] = False
+                    ret[host_name].update({'message': e.message.msg})
+                    continue
+            else:
+                raise
 
-        ret[host_name].update({'status': True})
+        network_system = host_ref.configManager.networkSystem
+
+        source_portgroup = None
+        for pg in host_ref.config.network.portgroup:
+            if pg.spec.name == v_nic[0].portgroup:
+                source_portgroup = pg
+                break
+
+        if not source_portgroup:
+            ret[host_name].update({'message': 'No matching portgroup on the vSwitch'})
+            ret['success'] = False
+            continue
+
+        virtual_nic_config = vim.HostVirtualNicConfig(
+            changeOperation='edit',
+            device=v_nic[0].device,
+            portgroup=source_portgroup.spec.name,
+            spec=vim.HostVirtualNicSpec(
+                distributedVirtualPort=vim.DistributedVirtualSwitchPortConnection(
+                                           portgroupKey=target_portgroup.key,
+                                           switchUuid=target_portgroup.config.distributedVirtualSwitch.uuid
+                                       )
+            )
+        )
+        current_vswitch_ports = host_ref.config.network.vswitch[0].numPorts
+        vswitch_config = vim.HostVirtualSwitchConfig(
+            changeOperation='edit',
+            name='vSwitch0',
+            spec=vim.HostVirtualSwitchSpec(numPorts=current_vswitch_ports)
+        )
+        proxyswitch_config = vim.HostProxySwitchConfig(
+            changeOperation='edit',
+            uuid=dvs_uuid,
+            spec=vim.HostProxySwitchSpec(backing=pnic_backing)
+        )
+        host_network_config = vim.HostNetworkConfig(
+            vswitch=[vswitch_config],
+            proxySwitch=[proxyswitch_config],
+            portgroup=[vim.HostPortGroupConfig(
+                           changeOperation='remove',
+                           spec=source_portgroup.spec)
+                      ],
+            vnic=[virtual_nic_config])
+
+        try:
+            network_system.UpdateNetworkConfig(changeMode='modify',
+                                               config=host_network_config)
+            ret[host_name].update({'status': True})
+        except Exception as e:
+            if hasattr(e, 'msg'):
+                ret[host_name].update({'message': 'Failed to migrate adapters ({0})'.format(e.msg)})
+                continue
+            else:
+                raise
 
     return ret
-        # # host_network_config.proxySwitch[0].spec.backing.pnicSpec = dvs_pnic_spec
-        #
-        # network_system = host_ref.configManager.networkSystem
-        #
-        # host_network_config = network_system.networkConfig
-        #
-        #
-        # orig_portgroup = network_system.networkInfo.portgroup[0]
-        # host_portgroup_config = []
-        # host_portgroup_config.append(vim.HostPortGroupConfig(
-        #     changeOperation='remove',
-        #     spec=orig_portgroup.spec
-        # ))
-        # # host_portgroup_config.append(vim.HostPortGroupConfig(
-        # #     changeOperation='add',
-        # #     spec=target_portgroup
-        # #
-        # # ))
-        # dvs_port_connection = vim.DistributedVirtualSwitchPortConnection(
-        #     portgroupKey=target_portgroup.key, switchUuid=dvs_uuid
-        # )
-        # host_vnic_spec = vim.HostVirtualNicSpec(
-        #         distributedVirtualPort=dvs_port_connection
-        # )
-        # host_vnic_config = vim.HostVirtualNicConfig(
-        #     changeOperation='add',
-        #     device=vmknic_name,
-        #     portgroup=target_portgroup.key,
-        #     spec=host_vnic_spec
-        # )
-        # host_network_config.proxySwitch[0].spec.backing = pnic_backing
-        # host_network_config.portgroup = host_portgroup_config
-        # host_network_config.vnic = [host_vnic_config]
-        # # host_network_config = vim.HostNetworkConfig(
-        # #     portgroup=[host_portgroup_config],
-        # #     vnic=[host_vnic_config]
-        # # )
-        # network_system.UpdateNetworkConfig(changeMode='modify',
-        #                                    config=host_network_config)
+
+
+def _get_esxdatacenter_proxy_details():
+    '''
+    Returns the running esxdatacenter's proxy details
+    '''
+    det = __salt__['esxdatacenter.get_details']()
+    return det.get('vcenter'), det.get('username'), det.get('password'), \
+            det.get('protocol'), det.get('port'), det.get('mechanism'), \
+            det.get('principal'), det.get('domain'), det.get('datacenter')

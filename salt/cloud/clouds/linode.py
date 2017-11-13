@@ -35,7 +35,7 @@ import datetime
 
 # Import Salt Libs
 import salt.config as config
-import salt.ext.six as six
+from salt.ext import six
 from salt.ext.six.moves import range
 from salt.exceptions import (
     SaltCloudConfigError,
@@ -43,7 +43,6 @@ from salt.exceptions import (
     SaltCloudNotFound,
     SaltCloudSystemExit
 )
-from salt.utils import warn_until
 
 # Import Salt-Cloud Libs
 import salt.utils.cloud
@@ -339,23 +338,15 @@ def create(vm_):
     except AttributeError:
         pass
 
-    # Since using "provider: <provider-engine>" is deprecated, alias provider
-    # to use driver: "driver: <provider-engine>"
-    if 'provider' in vm_:
-        vm_['driver'] = vm_.pop('provider')
-
     if _validate_name(name) is False:
         return False
 
-    salt.utils.cloud.fire_event(
+    __utils__['cloud.fire_event'](
         'event',
         'starting create',
         'salt/cloud/{0}/creating'.format(name),
-        {
-            'name': name,
-            'profile': vm_['profile'],
-            'provider': vm_['driver'],
-        },
+        args=__utils__['cloud.filter_event']('creating', vm_, ['name', 'profile', 'provider', 'driver']),
+        sock_dir=__opts__['sock_dir'],
         transport=__opts__['transport']
     )
 
@@ -438,11 +429,22 @@ def create(vm_):
             )
             return False
 
-    salt.utils.cloud.fire_event(
+    if 'ERRORARRAY' in result:
+        for error_data in result['ERRORARRAY']:
+            log.error('Error creating {0} on Linode\n\n'
+                    'The Linode API returned the following: {1}\n'.format(
+                        name,
+                        error_data['ERRORMESSAGE']
+                        )
+                    )
+            return False
+
+    __utils__['cloud.fire_event'](
         'event',
         'requesting instance',
         'salt/cloud/{0}/requesting'.format(name),
-        {'kwargs': kwargs},
+        args=__utils__['cloud.filter_event']('requesting', vm_, ['name', 'profile', 'provider', 'driver']),
+        sock_dir=__opts__['sock_dir'],
         transport=__opts__['transport']
     )
 
@@ -513,8 +515,22 @@ def create(vm_):
     # If a password wasn't supplied in the profile or provider config, set it now.
     vm_['password'] = get_password(vm_)
 
+    # Make public_ips and private_ips available to the bootstrap script.
+    vm_['public_ips'] = ips['public_ips']
+    vm_['private_ips'] = ips['private_ips']
+
+    # Send event that the instance has booted.
+    __utils__['cloud.fire_event'](
+        'event',
+        'waiting for ssh',
+        'salt/cloud/{0}/waiting_for_ssh'.format(name),
+        sock_dir=__opts__['sock_dir'],
+        args={'ip_address': vm_['ssh_host']},
+        transport=__opts__['transport']
+    )
+
     # Bootstrap!
-    ret = salt.utils.cloud.bootstrap(vm_, __opts__)
+    ret = __utils__['cloud.bootstrap'](vm_, __opts__)
 
     ret.update(data)
 
@@ -525,15 +541,12 @@ def create(vm_):
         )
     )
 
-    salt.utils.cloud.fire_event(
+    __utils__['cloud.fire_event'](
         'event',
         'created instance',
         'salt/cloud/{0}/created'.format(name),
-        {
-            'name': name,
-            'profile': vm_['profile'],
-            'provider': vm_['driver'],
-        },
+        args=__utils__['cloud.filter_event']('created', vm_, ['name', 'profile', 'provider', 'driver']),
+        sock_dir=__opts__['sock_dir'],
         transport=__opts__['transport']
     )
 
@@ -736,11 +749,12 @@ def destroy(name, call=None):
             '-a or --action.'
         )
 
-    salt.utils.cloud.fire_event(
+    __utils__['cloud.fire_event'](
         'event',
         'destroying instance',
         'salt/cloud/{0}/destroying'.format(name),
-        {'name': name},
+        args={'name': name},
+        sock_dir=__opts__['sock_dir'],
         transport=__opts__['transport']
     )
 
@@ -748,16 +762,17 @@ def destroy(name, call=None):
 
     response = _query('linode', 'delete', args={'LinodeID': linode_id, 'skipChecks': True})
 
-    salt.utils.cloud.fire_event(
+    __utils__['cloud.fire_event'](
         'event',
         'destroyed instance',
         'salt/cloud/{0}/destroyed'.format(name),
-        {'name': name},
+        args={'name': name},
+        sock_dir=__opts__['sock_dir'],
         transport=__opts__['transport']
     )
 
     if __opts__.get('update_cachedir', False) is True:
-        salt.utils.cloud.delete_minion_cachedir(name, __active_provider_name__.split(':')[0], __opts__)
+        __utils__['cloud.delete_minion_cachedir'](name, __active_provider_name__.split(':')[0], __opts__)
 
     return response
 
@@ -864,9 +879,11 @@ def get_distribution_id(vm_):
     if not distro_id:
         raise SaltCloudNotFound(
             'The DistributionID for the \'{0}\' profile could not be found.\n'
-            'The \'{1}\' instance could not be provisioned.'.format(
+            'The \'{1}\' instance could not be provisioned. The following distributions '
+            'are available:\n{2}'.format(
                 vm_image_name,
-                vm_['name']
+                vm_['name'],
+                pprint.pprint(sorted([distro['LABEL'].encode(__salt_system_encoding__) for distro in distributions]))
             )
         )
 
@@ -1026,16 +1043,6 @@ def get_private_ip(vm_):
     '''
     Return True if a private ip address is requested
     '''
-    if 'private_ip' in vm_:
-        warn_until(
-            'Carbon',
-            'The \'private_ip\' option is being deprecated in favor of the '
-            '\'assign_private_ip\' option. Please convert your Linode configuration '
-            'files to use \'assign_private_ip\'.'
-        )
-        vm_['assign_private_ip'] = vm_['private_ip']
-        vm_.pop('private_ip')
-
     return config.get_cloud_config_value(
         'assign_private_ip', vm_, __opts__, default=False
     )
@@ -1615,7 +1622,7 @@ def _get_status_descr_by_id(status_id):
     status_id
         linode VM status ID
     '''
-    for status_name, status_data in LINODE_STATUS.iteritems():
+    for status_name, status_data in six.iteritems(LINODE_STATUS):
         if status_data['code'] == int(status_id):
             return status_data['descr']
     return LINODE_STATUS.get(status_id, None)

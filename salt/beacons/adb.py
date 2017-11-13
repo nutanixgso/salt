@@ -11,24 +11,25 @@ import logging
 
 # Salt libs
 import salt.utils
+import salt.utils.path
 
 log = logging.getLogger(__name__)
 
 __virtualname__ = 'adb'
 
 last_state = {}
-last_state_extra = {'value': False}
+last_state_extra = {'value': False, 'no_devices': False}
 
 
 def __virtual__():
-    which_result = salt.utils.which('adb')
+    which_result = salt.utils.path.which('adb')
     if which_result is None:
         return False
     else:
         return __virtualname__
 
 
-def validate(config):
+def __validate__(config):
     '''
     Validate the beacon configuration
     '''
@@ -74,14 +75,14 @@ def beacon(config):
     log.trace('adb beacon starting')
     ret = []
 
-    _validate = validate(config)
+    _validate = __validate__(config)
     if not _validate[0]:
         return ret
 
     out = __salt__['cmd.run']('adb devices', runas=config.get('user', None))
 
     lines = out.split('\n')[1:]
-    last_state_devices = last_state.keys()
+    last_state_devices = list(last_state.keys())
     found_devices = []
 
     for line in lines:
@@ -125,11 +126,11 @@ def beacon(config):
 
     # Maybe send an event if we don't have any devices
     if 'no_devices_event' in config and config['no_devices_event'] is True:
-        if len(lines) == 0 and not last_state_extra['no_devices']:
+        if len(found_devices) == 0 and not last_state_extra['no_devices']:
             ret.append({'tag': 'no_devices'})
 
     # Did we have no devices listed this time around?
 
-    last_state_extra['no_devices'] = len(lines) == 0
+    last_state_extra['no_devices'] = len(found_devices) == 0
 
     return ret

@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 '''
-Manage users with the useradd command
+Manage users with the pw command
+
+.. important::
+    If you feel that Salt should be using this module to manage users on a
+    minion, and it is using a different module (or gives an error similar to
+    *'user.info' is not available*), see :ref:`here
+    <module-provider-override>`.
 '''
 
 # Notes:
@@ -38,10 +44,12 @@ except ImportError:
     HAS_PWD = False
 
 # Import 3rd party libs
-import salt.ext.six as six
+from salt.ext import six
 
 # Import salt libs
 import salt.utils
+import salt.utils.args
+import salt.utils.locales
 from salt.exceptions import CommandExecutionError
 
 log = logging.getLogger(__name__)
@@ -75,10 +83,10 @@ def _get_gecos(name):
         # Assign empty strings for any unspecified trailing GECOS fields
         while len(gecos_field) < 4:
             gecos_field.append('')
-        return {'fullname': str(gecos_field[0]),
-                'roomnumber': str(gecos_field[1]),
-                'workphone': str(gecos_field[2]),
-                'homephone': str(gecos_field[3])}
+        return {'fullname': salt.utils.locales.sdecode(gecos_field[0]),
+                'roomnumber': salt.utils.locales.sdecode(gecos_field[1]),
+                'workphone': salt.utils.locales.sdecode(gecos_field[2]),
+                'homephone': salt.utils.locales.sdecode(gecos_field[3])}
 
 
 def _build_gecos(gecos_dict):
@@ -86,7 +94,7 @@ def _build_gecos(gecos_dict):
     Accepts a dictionary entry containing GECOS field names and their values,
     and returns a full GECOS comment string, to be used with pw usermod.
     '''
-    return '{0},{1},{2},{3}'.format(gecos_dict.get('fullname', ''),
+    return u'{0},{1},{2},{3}'.format(gecos_dict.get('fullname', ''),
                                     gecos_dict.get('roomnumber', ''),
                                     gecos_dict.get('workphone', ''),
                                     gecos_dict.get('homephone', ''))
@@ -134,7 +142,7 @@ def add(name,
 
         salt '*' user.add name <uid> <gid> <groups> <home> <shell>
     '''
-    kwargs = salt.utils.clean_kwargs(**kwargs)
+    kwargs = salt.utils.args.clean_kwargs(**kwargs)
     if salt.utils.is_true(kwargs.pop('system', False)):
         log.warning('pw_user module does not support the \'system\' argument')
     if kwargs:
@@ -394,6 +402,29 @@ def chhomephone(name, homephone):
     return _update_gecos(name, 'homephone', homephone)
 
 
+def chloginclass(name, loginclass, root=None):
+    '''
+    Change the default login class of the user
+
+    .. versionadded:: 2016.3.5
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' user.chloginclass foo staff
+    '''
+    if loginclass == get_loginclass(name):
+        return True
+
+    cmd = ['pw', 'usermod', '-L', '{0}'.format(loginclass),
+           '-n', '{0}'.format(name)]
+
+    __salt__['cmd.run'](cmd, python_shell=False)
+
+    return get_loginclass(name) == loginclass
+
+
 def info(name):
     '''
     Return user information
@@ -442,10 +473,10 @@ def get_loginclass(name):
 
     '''
 
-    userinfo = __salt__['cmd.run_stdout']('pw usershow -n {0}'.format(name))
+    userinfo = __salt__['cmd.run_stdout'](['pw', 'usershow', '-n', name])
     userinfo = userinfo.split(':')
 
-    return {'loginclass': userinfo[4] if len(userinfo) == 10 else ''}
+    return userinfo[4] if len(userinfo) == 10 else ''
 
 
 def list_groups(name):

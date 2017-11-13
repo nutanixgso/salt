@@ -12,8 +12,9 @@ import stat
 import logging
 
 # Import Salt libs
-import salt.utils
-import salt.utils.decorators as decorators
+import salt.utils.decorators
+import salt.utils.decorators.path
+import salt.utils.path
 from salt.utils.odict import OrderedDict
 
 log = logging.getLogger(__name__)
@@ -24,21 +25,21 @@ __func_alias__ = {
 }
 
 
-@decorators.memoize
+@salt.utils.decorators.memoize
 def _check_zpool():
     '''
     Looks to see if zpool is present on the system
     '''
-    return salt.utils.which('zpool')
+    return salt.utils.path.which('zpool')
 
 
-@decorators.memoize
+@salt.utils.decorators.memoize
 def _check_features():
     '''
     Looks to see if zpool-features is available
     '''
     # get man location
-    man = salt.utils.which('man')
+    man = salt.utils.path.which('man')
     if not man:
         return False
 
@@ -49,12 +50,12 @@ def _check_features():
     return res['retcode'] == 0
 
 
-@decorators.memoize
+@salt.utils.decorators.memoize
 def _check_mkfile():
     '''
     Looks to see if mkfile is present on the system
     '''
-    return salt.utils.which('mkfile')
+    return salt.utils.path.which('mkfile')
 
 
 def __virtual__():
@@ -287,7 +288,7 @@ def iostat(zpool=None, sample_time=0):
                     dev = None
 
             if root_vdev:
-                if root_vdev not in config_data:
+                if not config_data.get(root_vdev):
                     config_data[root_vdev] = {}
                     if len(stat_data) > 0:
                         config_data[root_vdev] = stat_data
@@ -302,28 +303,6 @@ def iostat(zpool=None, sample_time=0):
                             config_data[root_vdev][vdev][dev] = stat_data
 
     return ret
-
-
-def zpool_list():
-    '''
-    .. deprecated:: 2014.7.0
-       Use :py:func:`~salt.modules.zpool.list` instead.
-
-    Return a list of all pools in the system with health status and space usage
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' zpool.zpool_list
-    '''
-    salt.utils.warn_until(
-            'Carbon',
-            'The \'zpool_list()\' module function is being deprecated and is '
-            'being renamed to \'list()\'. This function \'zpool_list()\' will be removed in '
-            'Salt Carbon.'
-        )
-    return list_()
 
 
 def list_(properties='size,alloc,free,cap,frag,health', zpool=None):
@@ -345,7 +324,7 @@ def list_(properties='size,alloc,free,cap,frag,health', zpool=None):
         optional zpool
 
     .. note::
-        multiple storage pool can be provded as a space seperated list
+        multiple storage pool can be provded as a space separated list
 
     CLI Example:
 
@@ -646,7 +625,6 @@ def create(zpool, *vdevs, **kwargs):
             salt '*' zpool.create myzpool /path/to/vdev1 [...] properties="{'property1': 'value1', 'property2': 'value2'}"
     '''
     ret = {}
-    dlist = []
 
     # Check if the pool_name is already being used
     if exists(zpool):
@@ -657,23 +635,7 @@ def create(zpool, *vdevs, **kwargs):
         ret[zpool] = 'no devices specified'
         return ret
 
-    # make sure files are present on filesystem
-    ret[zpool] = {}
-    for vdev in vdevs:
-        if vdev not in ['mirror', 'log', 'cache', 'raidz1', 'raidz2', 'raidz3', 'spare']:
-            if not os.path.exists(vdev):
-                ret[zpool][vdev] = 'not present on filesystem'
-                continue
-            mode = os.stat(vdev).st_mode
-            if not stat.S_ISBLK(mode) and not stat.S_ISREG(mode) and not stat.S_ISCHR(mode):
-                ret[zpool][vdev] = 'not a block device, a file vdev or character special device'
-                continue
-        dlist.append(vdev)
-
-    if len(ret[zpool]) > 0:
-        return ret
-
-    devs = ' '.join(dlist)
+    devs = ' '.join(vdevs)
     zpool_cmd = _check_zpool()
     force = kwargs.get('force', False)
     altroot = kwargs.get('altroot', None)
@@ -688,10 +650,13 @@ def create(zpool, *vdevs, **kwargs):
     if properties:  # create "-o property=value" pairs
         optlist = []
         for prop in properties:
-            if ' ' in properties[prop]:
-                value = "'{0}'".format(properties[prop])
+            if isinstance(properties[prop], bool):
+                value = 'on' if properties[prop] else 'off'
             else:
-                value = properties[prop]
+                if ' ' in properties[prop]:
+                    value = "'{0}'".format(properties[prop])
+                else:
+                    value = properties[prop]
             optlist.append('-o {0}={1}'.format(prop, value))
         opts = ' '.join(optlist)
         cmd = '{0} {1}'.format(cmd, opts)
@@ -718,7 +683,7 @@ def create(zpool, *vdevs, **kwargs):
     if res['retcode'] != 0:
         ret[zpool] = res['stderr'] if 'stderr' in res else res['stdout']
     else:
-        ret[zpool] = 'created'
+        ret[zpool] = 'created with {0}'.format(devs)
 
     return ret
 
@@ -743,7 +708,6 @@ def add(zpool, *vdevs, **kwargs):
         salt '*' zpool.add myzpool /path/to/vdev1 /path/to/vdev2 [...]
     '''
     ret = {}
-    dlist = []
 
     # check for pool
     if not exists(zpool):
@@ -755,24 +719,7 @@ def add(zpool, *vdevs, **kwargs):
         return ret
 
     force = kwargs.get('force', False)
-
-    # make sure files are present on filesystem
-    ret[zpool] = {}
-    for vdev in vdevs:
-        if vdev not in ['mirror', 'log', 'cache', 'raidz1', 'raidz2', 'raidz3', 'spare']:
-            if not os.path.exists(vdev):
-                ret[zpool][vdev] = 'not present on filesystem'
-                continue
-            mode = os.stat(vdev).st_mode
-            if not stat.S_ISBLK(mode) and not stat.S_ISREG(mode):
-                ret[zpool][vdev] = 'not a block device, a file vdev or character special device'
-                continue
-        dlist.append(vdev)
-
-    if len(ret[zpool]) > 0:
-        return ret
-
-    devs = ' '.join(dlist)
+    devs = ' '.join(vdevs)
 
     # try and add watch out for mismatched replication levels
     zpool_cmd = _check_zpool()
@@ -786,10 +733,7 @@ def add(zpool, *vdevs, **kwargs):
     if res['retcode'] != 0:
         ret[zpool] = res['stderr'] if 'stderr' in res else res['stdout']
     else:
-        ret[zpool] = {}
-        for device in dlist:
-            if device not in ['mirror', 'log', 'cache', 'raidz1', 'raidz2', 'raidz3', 'spare']:
-                ret[zpool][device] = 'added'
+        ret[zpool] = 'added {0}'.format(devs)
 
     return ret
 
@@ -970,13 +914,12 @@ def replace(zpool, old_device, new_device=None, force=False):
     if res['retcode'] != 0:
         ret[zpool] = res['stderr'] if 'stderr' in res else res['stdout']
     else:
-        ret[zpool] = {}
-        ret[zpool][old_device] = 'replaced with {0}'.format(new_device)
+        ret[zpool] = 'replaced {0} with {1}'.format(old_device, new_device)
 
     return ret
 
 
-@salt.utils.decorators.which('mkfile')
+@salt.utils.decorators.path.which('mkfile')
 def create_file_vdev(size, *vdevs):
     '''
     .. versionchanged:: 2016.3.0
@@ -1085,7 +1028,7 @@ def import_(zpool=None, new_name=None, **kwargs):
     altroot : string
         equivalent to "-o cachefile=none,altroot=root"
     dir : string
-        searches for devices or files in dir, mutiple dirs can be specified as follows:: dir="dir1,dir2"
+        searches for devices or files in dir, multiple dirs can be specified as follows:: dir="dir1,dir2"
     no_mount : boolean
         import the pool without mounting any file systems.
     only_destroyed : boolean
@@ -1207,22 +1150,7 @@ def online(zpool, *vdevs, **kwargs):
     # get expand option
     expand = kwargs.get('expand', False)
 
-    # make sure files are present on filesystem
-    ret[zpool] = {}
-    for vdev in vdevs:
-        if not os.path.exists(vdev):
-            ret[zpool][vdev] = 'not present on filesystem'
-            continue
-        mode = os.stat(vdev).st_mode
-        if not stat.S_ISBLK(mode) and not stat.S_ISREG(mode):
-            ret[zpool][vdev] = 'not a block device, a file vdev or character special device'
-            continue
-        dlist.append(vdev)
-
-    if len(ret[zpool]) > 0:
-        return ret
-
-    devs = ' '.join(dlist)
+    devs = ' '.join(vdevs)
     zpool_cmd = _check_zpool()
     cmd = '{zpool_cmd} online {expand}{zpool} {devs}'.format(
         zpool_cmd=zpool_cmd,
@@ -1235,10 +1163,7 @@ def online(zpool, *vdevs, **kwargs):
     if res['retcode'] != 0:
         ret[zpool] = res['stderr'] if 'stderr' in res else res['stdout']
     else:
-        ret[zpool] = {}
-        for device in dlist:
-            if device not in ['mirror', 'log', 'cache', 'raidz1', 'raidz2', 'raidz3', 'spare']:
-                ret[zpool][device] = 'onlined'
+        ret[zpool] = 'onlined {0}'.format(devs)
     return ret
 
 
@@ -1294,10 +1219,7 @@ def offline(zpool, *vdevs, **kwargs):
     if res['retcode'] != 0:
         ret[zpool] = res['stderr'] if 'stderr' in res else res['stdout']
     else:
-        ret[zpool] = {}
-        for device in vdevs:
-            if device not in ['mirror', 'log', 'cache', 'raidz1', 'raidz2', 'raidz3', 'spare']:
-                ret[zpool][device] = 'offlined'
+        ret[zpool] = 'offlined {0}'.format(devs)
     return ret
 
 

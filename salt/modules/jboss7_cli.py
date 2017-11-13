@@ -47,7 +47,7 @@ import time
 from salt.exceptions import CommandExecutionError
 
 # Import 3rd-party libs
-import salt.ext.six as six
+from salt.ext import six
 
 log = logging.getLogger(__name__)
 
@@ -298,8 +298,11 @@ def __process_tokens_internal(tokens, start_at=0):
         elif __is_assignment(token):
             log.debug("    TYPE: ASSIGNMENT")
             is_assignment = True
+        elif __is_expression(token):
+            log.debug("    TYPE: EXPRESSION")
+            is_expression = True
         else:
-            raise CommandExecutionError('Unknown token!', 'Token:'+token)
+            raise CommandExecutionError('Unknown token! Token: {0}'.format(token))
 
         token_no = token_no + 1
 
@@ -372,3 +375,7 @@ def __get_quoted_string(token):
 
 def __is_assignment(token):
     return token == '=>'
+
+
+def __is_expression(token):
+    return token == 'expression'

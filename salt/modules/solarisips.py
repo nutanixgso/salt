@@ -2,6 +2,12 @@
 '''
 IPS pkg support for Solaris
 
+.. important::
+    If you feel that Salt should be using this module to manage packages on a
+    minion, and it is using a different module (or gives an error similar to
+    *'pkg.install' is not available*), see :ref:`here
+    <module-provider-override>`.
+
 This module provides support for Solaris 11 new package management - IPS (Image Packaging System).
 This is the default pkg module for Solaris 11 (and later).
 
@@ -38,6 +44,8 @@ import logging
 
 # Import salt libs
 import salt.utils
+import salt.utils.path
+import salt.utils.pkg
 from salt.exceptions import CommandExecutionError
 
 # Define the module's virtual name
@@ -49,9 +57,9 @@ def __virtual__():
     '''
     Set the virtual pkg module if the os is Solaris 11
     '''
-    if __grains__['os'] == 'Solaris' \
+    if __grains__['os_family'] == 'Solaris' \
             and float(__grains__['kernelrelease']) > 5.10 \
-            and salt.utils.which('pkg'):
+            and salt.utils.path.which('pkg'):
         return __virtualname__
     return (False,
             'The solarisips execution module failed to load: only available '
@@ -112,6 +120,8 @@ def refresh_db(full=False):
         salt '*' pkg.refresh_db
         salt '*' pkg.refresh_db full=True
     '''
+    # Remove rtag file to keep multiple refreshes from happening in pkg states
+    salt.utils.pkg.clear_rtag(__opts__)
     if full:
         return __salt__['cmd.retcode']('/bin/pkg refresh --full') == 0
     else:
@@ -140,26 +150,36 @@ def upgrade_available(name):
     return ret
 
 
-def list_upgrades(refresh=False):
+def list_upgrades(refresh=True, **kwargs):  # pylint: disable=W0613
     '''
     Lists all packages available for update.
-    When run in global zone, it reports only upgradable packages for the global zone.
-    When run in non-global zone, it can report more upgradable packages than
-    "pkg update -vn" because "pkg update" hides packages that require newer
-    version of pkg://solaris/entire (which means that they can be upgraded only
-    from global zone). Simply said: if you see pkg://solaris/entire in the list
-    of upgrades, you should upgrade the global zone to get all possible
-    updates.
 
-    refresh : False
-        Set to ``True`` to force a full pkg DB refresh before listing
+    When run in global zone, it reports only upgradable packages for the global
+    zone.
+
+    When run in non-global zone, it can report more upgradable packages than
+    ``pkg update -vn``, because ``pkg update`` hides packages that require
+    newer version of ``pkg://solaris/entire`` (which means that they can be
+    upgraded only from the global zone). If ``pkg://solaris/entire`` is found
+    in the list of upgrades, then the global zone should be updated to get all
+    possible updates. Use ``refresh=True`` to refresh the package database.
+
+    refresh : True
+        Runs a full package database refresh before listing. Set to ``False`` to
+        disable running the refresh.
+
+        .. versionchanged:: 2017.7.0
+
+        In previous versions of Salt, ``refresh`` defaulted to ``False``. This was
+        changed to default to ``True`` in the 2017.7.0 release to make the behavior
+        more consistent with the other package modules, which all default to ``True``.
 
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' pkg.list_upgrades
-        salt '*' pkg.list_upgrades refresh=True
+        salt '*' pkg.list_upgrades refresh=False
     '''
     if salt.utils.is_true(refresh):
         refresh_db(full=True)
@@ -178,9 +198,16 @@ def upgrade(refresh=False, **kwargs):
     In non-global zones upgrade is limited by dependency constrains linked to
     the version of pkg://solaris/entire.
 
-    Returns also the raw output of the ``pkg update`` command (because if
-    update creates a new boot environment, no immediate changes are visible in
-    ``pkg list``).
+    Returns a dictionary containing the changes:
+
+    .. code-block:: python
+
+        {'<package>':  {'old': '<old-version>',
+                        'new': '<new-version>'}}
+
+    When there is a failure, an explanation is also included in the error
+    message, based on the return code of the ``pkg update`` command.
+
 
     CLI Example:
 
@@ -188,11 +215,6 @@ def upgrade(refresh=False, **kwargs):
 
         salt '*' pkg.upgrade
     '''
-    ret = {'changes': {},
-           'result': True,
-           'comment': '',
-           }
-
     if salt.utils.is_true(refresh):
         refresh_db()
 
@@ -203,22 +225,19 @@ def upgrade(refresh=False, **kwargs):
     # Install or upgrade the package
     # If package is already installed
     cmd = ['pkg', 'update', '-v', '--accept']
-    out = __salt__['cmd.run_all'](cmd,
-                                  output_loglevel='trace',
-                                  python_shell=False)
-
+    result = __salt__['cmd.run_all'](cmd,
+                                     output_loglevel='trace',
+                                     python_shell=False)
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
     ret = salt.utils.compare_dicts(old, new)
 
-    if out['retcode'] != 0:
+    if result['retcode'] != 0:
         raise CommandExecutionError(
-            'Error occurred updating package(s)',
-            info={
-                'changes': ret,
-                'retcode': ips_pkg_return_values[out['retcode']],
-                'errors': [out['stderr']]
-            }
+            'Problem encountered upgrading packages',
+            info={'changes': ret,
+                  'retcode': ips_pkg_return_values[result['retcode']],
+                  'result': result}
         )
 
     return ret

@@ -44,11 +44,11 @@ import re
 import traceback
 
 # Import Salt libs
-from salt.utils import dictdiffer
+import salt.utils.dictdiffer as dictdiffer
 from salt.exceptions import CommandExecutionError
 
 # Import 3rd-party libs
-import salt.ext.six as six
+from salt.ext import six
 
 log = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def datasource_exists(name, jboss_config, datasource_properties, recreate=False,
                 ret['result'] = False
                 ret['comment'] = 'Could not create datasource. Stdout: '+create_result['stdout']
         else:
-            raise CommandExecutionError('Unable to handle error', ds_result['failure-description'])
+            raise CommandExecutionError('Unable to handle error: {0}'.format(ds_result['failure-description']))
 
     if ret['result']:
         log.debug("ds_new_properties=%s", str(ds_new_properties))
@@ -412,12 +412,14 @@ def __get_artifact(salt_source):
                     template=None,
                     source=salt_source['source'],
                     source_hash=None,
+                    source_hash_name=None,
                     user=None,
                     group=None,
                     mode=None,
                     saltenv=__env__,
                     context=None,
                     defaults=None,
+                    skip_verify=False,
                     kwargs=None)
 
                 manage_result = __salt__['file.manage_file'](
@@ -446,9 +448,9 @@ def __get_artifact(salt_source):
                 log.debug(traceback.format_exc())
                 comment = 'Unable to manage file: {0}'.format(e)
 
-            else:
-                resolved_source = salt_source['target_file']
-                comment = ''
+        else:
+            resolved_source = salt_source['target_file']
+            comment = ''
 
     return resolved_source, comment
 
@@ -530,6 +532,12 @@ def __check_dict_contains(dct, dict_name, keys, comment='', result=True):
 
 
 def __append_comment(new_comment, current_comment=''):
+    if current_comment is None and new_comment is None:
+        return ''
+    if current_comment is None:
+        return new_comment
+    if new_comment is None:
+        return current_comment
     return current_comment+'\n'+new_comment
 
 

@@ -90,7 +90,10 @@ def __virtual__():
     '''
     Only return if python-etcd is installed
     '''
-    return __virtualname__ if HAS_LIBS else False
+    if HAS_LIBS:
+        return __virtualname__
+
+    return False, 'Could not import etcd returner; python-etcd is not installed.'
 
 
 def _get_conn(opts, profile=None):
@@ -133,7 +136,7 @@ def returner(ret):
         client.set(dest, json.dumps(ret[field]), ttl=ttl)
 
 
-def save_load(jid, load):
+def save_load(jid, load, minions=None):
     '''
     Save the load to the specified jid
     '''
@@ -148,6 +151,13 @@ def save_load(jid, load):
         json.dumps(load),
         ttl=ttl,
     )
+
+
+def save_minions(jid, minions, syndic_id=None):  # pylint: disable=unused-argument
+    '''
+    Included for API consistency
+    '''
+    pass
 
 
 def get_load(jid):

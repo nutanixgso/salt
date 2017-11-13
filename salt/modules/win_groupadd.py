@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 '''
 Manage groups on Windows
+
+.. important::
+    If you feel that Salt should be using this module to manage groups on a
+    minion, and it is using a different module (or gives an error similar to
+    *'group.info' is not available*), see :ref:`here
+    <module-provider-override>`.
 '''
 from __future__ import absolute_import
 
-# Import salt libs
-import salt.utils
+# Import Salt libs
+import salt.utils.platform
 
 
 try:
@@ -24,7 +30,7 @@ def __virtual__():
     '''
     Set the group module if the kernel is Windows
     '''
-    if salt.utils.is_windows() and HAS_DEPENDENCIES:
+    if salt.utils.platform.is_windows() and HAS_DEPENDENCIES:
         return __virtualname__
     return (False, "Module win_groupadd: module only works on Windows systems")
 
@@ -368,3 +374,32 @@ def __fixlocaluser(username):
         username = ('{0}\\{1}').format(__salt__['grains.get']('host'), username)
 
     return username.lower()
+
+
+def list_groups(refresh=False):
+    '''
+    Return a list of groups
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' group.getent
+    '''
+    if 'group.list_groups' in __context__ and not refresh:
+        return __context__['group.getent']
+
+    ret = []
+
+    pythoncom.CoInitialize()
+    nt = win32com.client.Dispatch('AdsNameSpaces')
+
+    results = nt.GetObject('', 'WinNT://.')
+    results.Filter = ['group']
+
+    for result in results:
+        ret.append(result.name)
+
+    __context__['group.list_groups'] = ret
+
+    return ret

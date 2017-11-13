@@ -14,7 +14,7 @@
 
     Configuring the python `Sentry`_ client, `Raven`_, should be done under the
     ``sentry_handler`` configuration key. Additional `context` may be provided
-    for coresponding grain item(s).
+    for corresponding grain item(s).
     At the bare minimum, you need to define the `DSN`_. As an example:
 
     .. code-block:: yaml
@@ -70,10 +70,10 @@
 
 
 
-    .. _`DSN`: http://raven.readthedocs.org/en/latest/config/index.html#the-sentry-dsn
+    .. _`DSN`: https://raven.readthedocs.io/en/latest/config/index.html#the-sentry-dsn
     .. _`Sentry`: https://getsentry.com
-    .. _`Raven`: http://raven.readthedocs.org
-    .. _`Raven client documentation`: http://raven.readthedocs.org/en/latest/config/index.html#client-arguments
+    .. _`Raven`: https://raven.readthedocs.io
+    .. _`Raven client documentation`: https://raven.readthedocs.io/en/latest/config/index.html#client-arguments
 '''
 from __future__ import absolute_import
 
@@ -81,6 +81,7 @@ from __future__ import absolute_import
 import logging
 
 # Import salt libs
+import salt.loader
 from salt.log import LOG_LEVELS
 
 # Import 3rd party libs
@@ -92,6 +93,8 @@ except ImportError:
     HAS_RAVEN = False
 
 log = logging.getLogger(__name__)
+__grains__ = {}
+__salt__ = {}
 
 # Define the module's virtual name
 __virtualname__ = 'sentry'
@@ -99,6 +102,8 @@ __virtualname__ = 'sentry'
 
 def __virtual__():
     if HAS_RAVEN is True:
+        __grains__ = salt.loader.grains(__opts__)
+        __salt__ = salt.loader.minion_mods(__opts__)
         return __virtualname__
     return False
 
@@ -119,8 +124,10 @@ def setup_handlers():
             if not transport_registry.supported_scheme(url.scheme):
                 raise ValueError('Unsupported Sentry DSN scheme: {0}'.format(url.scheme))
             dsn_config = {}
-            conf_extras = transport_registry.compute_scope(url, dsn_config)
-            dsn_config.update(conf_extras)
+            if (hasattr(transport_registry, 'compute_scope') and
+                    callable(transport_registry.compute_scope)):
+                conf_extras = transport_registry.compute_scope(url, dsn_config)
+                dsn_config.update(conf_extras)
             options.update({
                 'project': dsn_config['SENTRY_PROJECT'],
                 'servers': dsn_config['SENTRY_SERVERS'],

@@ -8,7 +8,15 @@ Beacon to monitor statistics from ethernet adapters
 # Import Python libs
 from __future__ import absolute_import
 import logging
-import psutil
+
+# Import third party libs
+# pylint: disable=import-error
+try:
+    import salt.utils.psutil_compat as psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+# pylint: enable=import-error
 
 log = logging.getLogger(__name__)
 
@@ -26,16 +34,18 @@ def _to_list(obj):
     ret = {}
 
     for attr in __attrs:
-        # Better way to do this?
-        ret[attr] = obj.__dict__[attr]
+        if hasattr(obj, attr):
+            ret[attr] = getattr(obj, attr)
     return ret
 
 
 def __virtual__():
+    if not HAS_PSUTIL:
+        return (False, 'cannot load network_info beacon: psutil not available')
     return __virtualname__
 
 
-def validate(config):
+def __validate__(config):
     '''
     Validate the beacon configuration
     '''
@@ -76,16 +86,16 @@ def beacon(config):
 
         beacons:
           network_info:
-            eth0:
-                - type: equal
-                - bytes_sent: 100000
-                - bytes_recv: 100000
-                - packets_sent: 100000
-                - packets_recv: 100000
-                - errin: 100
-                - errout: 100
-                - dropin: 100
-                - dropout: 100
+            - eth0:
+                type: equal
+                bytes_sent: 100000
+                bytes_recv: 100000
+                packets_sent: 100000
+                packets_recv: 100000
+                errin: 100
+                errout: 100
+                dropin: 100
+                dropout: 100
 
     Emit beacon when any values are greater
     than configured values.
@@ -94,16 +104,16 @@ def beacon(config):
 
         beacons:
           network_info:
-            eth0:
-                - type: greater
-                - bytes_sent: 100000
-                - bytes_recv: 100000
-                - packets_sent: 100000
-                - packets_recv: 100000
-                - errin: 100
-                - errout: 100
-                - dropin: 100
-                - dropout: 100
+            - eth0:
+                type: greater
+                bytes_sent: 100000
+                bytes_recv: 100000
+                packets_sent: 100000
+                packets_recv: 100000
+                errin: 100
+                errout: 100
+                dropin: 100
+                dropout: 100
 
 
     '''
@@ -111,20 +121,29 @@ def beacon(config):
 
     _stats = psutil.net_io_counters(pernic=True)
 
-    for interface in config:
+    for interface_config in config:
+        interface = interface_config.keys()[0]
         if interface in _stats:
             _if_stats = _stats[interface]
             _diff = False
             for attr in __attrs:
-                if attr in config[interface]:
-                    if 'type' in config[interface] and config[interface]['type'] == 'equal':
-                        if _if_stats.__dict__[attr] == int(config[interface][attr]):
+                if attr in interface_config[interface]:
+                    if 'type' in interface_config[interface] and \
+                            interface_config[interface]['type'] == 'equal':
+                        if getattr(_if_stats, attr, None) == \
+                                int(interface_config[interface][attr]):
                             _diff = True
-                    elif 'type' in config[interface] and config[interface]['type'] == 'greater':
-                        if _if_stats.__dict__[attr] > int(config[interface][attr]):
+                    elif 'type' in interface_config[interface] and \
+                            interface_config[interface]['type'] == 'greater':
+                        if getattr(_if_stats, attr, None) > \
+                                int(interface_config[interface][attr]):
                             _diff = True
+                        else:
+                            log.debug('attr {}'.format(getattr(_if_stats,
+                                                               attr, None)))
                     else:
-                        if _if_stats.__dict__[attr] == int(config[interface][attr]):
+                        if getattr(_if_stats, attr, None) == \
+                                int(interface_config[interface][attr]):
                             _diff = True
             if _diff:
                 ret.append({'interface': interface,

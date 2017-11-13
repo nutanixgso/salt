@@ -19,7 +19,7 @@ import logging
 
 # Salt imports
 from salt.modules import postgres
-import salt.ext.six as six
+from salt.ext import six
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,9 @@ def __virtual__():
     '''
     Only load if the postgres module is present
     '''
-    return 'postgres.user_exists' in __salt__
+    if 'postgres.user_exists' not in __salt__:
+        return (False, 'Unable to load postgres module.  Make sure `postgres.bins_dir` is set.')
+    return True
 
 
 def present(name,
@@ -93,7 +95,7 @@ def present(name,
         encrypted to the previous
         format if it is not already done.
 
-    default_passwoord
+    default_password
         The password used only when creating the user, unless password is set.
 
         .. versionadded:: 2016.3.0
@@ -119,7 +121,7 @@ def present(name,
         .. versionadded:: 0.17.0
 
     db_user
-        Postres database username, if different from config or default.
+        Postgres database username, if different from config or default.
 
     db_password
         Postgres user's password, if any password, for a specified db_user.
@@ -140,14 +142,14 @@ def present(name,
     # default to encrypted passwords
     if encrypted is not False:
         encrypted = postgres._DEFAULT_PASSWORDS_ENCRYPTION
-    # maybe encrypt if if not already and necessary
+    # maybe encrypt if it's not already and necessary
     password = postgres._maybe_encrypt_password(name,
                                                 password,
                                                 encrypted=encrypted)
 
     if default_password is not None:
         default_password = postgres._maybe_encrypt_password(name,
-                                                            password,
+                                                            default_password,
                                                             encrypted=encrypted)
 
     db_args = {

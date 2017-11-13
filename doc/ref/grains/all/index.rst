@@ -1,8 +1,8 @@
 .. _all-salt.grains:
 
-===================================
-Full list of builtin grains modules
-===================================
+==============
+grains modules
+==============
 
 .. currentmodule:: salt.grains
 
@@ -19,6 +19,8 @@ Full list of builtin grains modules
     junos
     marathon
     mdadm
+    metadata
+    napalm
     opts
     philips_hue
     rest_sample

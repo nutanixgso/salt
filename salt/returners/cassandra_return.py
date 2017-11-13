@@ -27,7 +27,7 @@ import logging
 import salt.utils.jid
 
 # Import third party libs
-import salt.ext.six as six
+from salt.ext import six
 try:
     import pycassa  # pylint: disable=import-error
     HAS_PYCASSA = True
@@ -47,7 +47,7 @@ __virtualname__ = 'cassandra'
 
 def __virtual__():
     if not HAS_PYCASSA:
-        return False
+        return False, 'Could not import cassandra returner; pycassa is not installed.'
     return __virtualname__
 
 

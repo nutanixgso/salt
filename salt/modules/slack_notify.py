@@ -201,8 +201,9 @@ def post_message(channel,
     if not channel:
         log.error('channel is a required option.')
 
-    # channel must start with a hash
-    if not channel.startswith('#'):
+    # channel must start with a hash or an @ (direct-message channels)
+    if not channel.startswith('#') and not channel.startswith('@'):
+        log.warning('Channel name must start with a hash or @. Prepending a hash and using "#{0}" as channel name instead of {1}'.format(channel, channel))
         channel = '#{0}'.format(channel)
 
     if not from_name:
@@ -241,9 +242,12 @@ def call_hook(message,
               attachment=None,
               color='good',
               short=False,
-              identifier=None):
+              identifier=None,
+              channel=None,
+              username=None,
+              icon_emoji=None):
     '''
-    Send message to Slack incomming webhook.
+    Send message to Slack incoming webhook.
 
     :param message:     The topic of message.
     :param attachment:  The message to send to the Slacke WebHook.
@@ -251,13 +255,16 @@ def call_hook(message,
     :param short:       An optional flag indicating whether the value is short
                         enough to be displayed side-by-side with other values.
     :param identifier:  The identifier of WebHook.
-    :return:            Boolean if message was sent successfuly.
+    :param channel:     The channel to use instead of the WebHook default.
+    :param username:    Username to use instead of WebHook default.
+    :param icon_emoji:  Icon to use instead of WebHook default.
+    :return:            Boolean if message was sent successfully.
 
     CLI Example:
 
     .. code-block:: bash
 
-        salt '*' slack.post_hook message='Hello, from SaltStack'
+        salt '*' slack.call_hook message='Hello, from SaltStack'
 
     '''
     base_url = 'https://hooks.slack.com/services/'
@@ -290,12 +297,21 @@ def call_hook(message,
             'text': message,
         }
 
+    if channel:
+        payload['channel'] = channel
+
+    if username:
+        payload['username'] = username
+
+    if icon_emoji:
+        payload['icon_emoji'] = icon_emoji
+
     data = _urlencode(
         {
             'payload': json.dumps(payload, ensure_ascii=False)
         }
     )
-    result = salt.utils.http.query(url, 'POST', data=data)
+    result = salt.utils.http.query(url, method='POST', data=data, status=True)
 
     if result['status'] <= 201:
         return True
